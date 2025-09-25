@@ -3,8 +3,15 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { generateBatchImages } from '@/lib/doubao'
 import { createVeo3Job } from '@/lib/veo3'
-import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo } from '@/lib/db'
+import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus } from '@/lib/db'
 import type { ReferenceImage, ScriptSegment as DbScriptSegment } from '@/lib/types'
+
+// 查询 Veo3 任务详情，返回可能包含 video_url 的结构
+async function fetchVeo3Detail(taskId: string) {
+  const res = await fetch(`/api/veo3/detail?id=${encodeURIComponent(taskId)}`)
+  if (!res.ok) throw new Error(`Fetch detail failed: ${res.status}`)
+  return res.json() as Promise<{ id: string; status: string; detail?: any; video_url?: string; data?: any }>
+}
 
 interface StoryboardSubject {
   characters_present?: string
@@ -59,6 +66,8 @@ interface VideoJobState {
   status: 'idle' | 'pending' | 'success' | 'error'
   jobId?: string
   error?: string
+  videoUrl?: string
+  dbId?: string
 }
 
 type DoubaoSizeMode = 'preset' | 'custom'
@@ -401,7 +410,7 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
     { id: 'rule_default_3', find: '角色C', replace: '参考图3' }
   ])
   const [videoJobs, setVideoJobs] = useState<Record<string, VideoJobState>>({})
-  const [veoModel, setVeoModel] = useState('veo3-fast')
+  const [veoModel, setVeoModel] = useState('veo3-fast-frames')
   const [veoAspectRatio, setVeoAspectRatio] = useState<'16:9' | '9:16'>('9:16')
   const [veoEnhancePrompt, setVeoEnhancePrompt] = useState(true)
   const [veoUpsample, setVeoUpsample] = useState(false)
@@ -1002,13 +1011,15 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
 
           // Persist Veo3 submission to Supabase
           try {
-            await createGeneratedVideo(
+            const saved = await createGeneratedVideo(
               image.url,
               promptForVideo,
               scriptId,
               'pending',
               ''
             )
+            nextJobs[target.id] = { ...nextJobs[target.id], dbId: saved.id }
+            setVideoJobs({ ...nextJobs })
           } catch (e) {
             console.error('Failed to save video record to Supabase', e)
           }
@@ -1749,6 +1760,60 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
                 {image && (
                   <p className="text-[11px] text-gray-500">Doubao prompt: {image.prompt}</p>
                 )}
+
+                {/* Veo3 任务状态与视频播放 */}
+                {job && (
+                  <div className="mt-2 rounded bg-gray-50 p-2 text-xs text-gray-700">
+                    <div className="flex items-center justify-between">
+                      <span>Status: {job.status}{job.error ? ` (${job.error})` : ''}</span>
+                      {job.jobId && <span>Job ID: {job.jobId}</span>}
+                    </div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="rounded-md border border-gray-300 px-2 py-1 hover:bg-gray-100"
+                        disabled={!job.jobId}
+                        onClick={async () => {
+                          if (!job.jobId) return
+                          try {
+                            const detail = await fetchVeo3Detail(job.jobId)
+                            const rawUrl = detail.video_url || detail?.detail?.video_url || detail?.data?.video_url
+                            const videoUrl = typeof rawUrl === 'string' ? rawUrl.trim().replace(/^`|`$/g, '').replace(/^"|"$/g, '') : undefined
+                            if (videoUrl) {
+                              setVideoJobs(prev => ({
+                                ...prev,
+                                [segment.id]: { ...(prev[segment.id] || { status: 'success' }), ...job, videoUrl }
+                              }))
+                              if (job.dbId) {
+                                try {
+                                  await updateGeneratedVideoStatus(job.dbId, { status: 'completed', video_url: videoUrl })
+                                } catch (e) {
+                                  console.error('Failed to persist video_url', e)
+                                }
+                              }
+                            }
+                          } catch (e) {
+                            console.error('Refresh video detail failed', e)
+                            setStatus({ type: 'error', text: 'Refresh video detail failed.' })
+                          }
+                        }}
+                      >
+                        查询进度/刷新链接
+                      </button>
+                      {job.videoUrl && (
+                        <a href={job.videoUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                          打开视频链接
+                        </a>
+                      )}
+                    </div>
+                    {job.videoUrl && (
+                      <div className="mt-2">
+                        <video src={job.videoUrl} controls className="w-full rounded" />
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* ---- Shot 片段文本编辑 ---- */}
                   <details className="group">
                   <summary className="cursor-pointer select-none text-xs text-blue-600 hover:underline">
