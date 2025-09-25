@@ -373,6 +373,82 @@ function extractActionText(segment: StoryboardSegment, imagePromptText?: string)
 
   return ''
 }
+
+// 解析 CSV 中的分镜提示块（中文标签）为结构化 StoryboardPrompt
+function parsePromptBlock(block: string): StoryboardPrompt {
+  const lines = block
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 0)
+
+  const takeAfterLabel = (label: string): string | undefined => {
+    const line = lines.find(l => l.startsWith(label))
+    if (!line) return undefined
+    const value = line.slice(label.length).trim()
+    return value || undefined
+  }
+
+  const subject: StoryboardSubject = {}
+  subject.characters_present = takeAfterLabel('角色：')
+  const expression = takeAfterLabel('表情：')
+  if (expression) subject.expression = expression
+  subject.action = takeAfterLabel('动作：')
+
+  // 按段落标题抓取下一行内容
+  const valueAfterSection = (section: string): string | undefined => {
+    const idx = lines.findIndex(l => l === section)
+    if (idx === -1) return undefined
+    // 找到该段落后的第一条非空行
+    for (let i = idx + 1; i < lines.length; i++) {
+      const v = lines[i]
+      if (v && !v.startsWith('[')) return v
+      if (v.startsWith('[')) break
+    }
+    return undefined
+  }
+
+  const prompt: StoryboardPrompt = {}
+  if (subject.characters_present || subject.expression || subject.action) {
+    prompt.subject = subject
+  }
+  prompt.environment = valueAfterSection('[环境]')
+  prompt.time_of_day = valueAfterSection('[时间]')
+  prompt.weather = valueAfterSection('[天气]')
+  prompt.camera_angle = valueAfterSection('[视角]')
+  prompt.shot_size = valueAfterSection('[景别]')
+
+  return prompt
+}
+
+// 将 CSV 文本解析为 StoryboardSegment 数组（格式：分镜数,分镜提示词）
+function parseStoryboardCsv(csvText: string): StoryboardSegment[] {
+  const text = (csvText || '').trim()
+  if (!text) return []
+
+  // 支持包含多行引号字段的简单解析：匹配 行首/换行 + 数字 + 逗号 + "块"
+  const re = /(\n|^)\s*(\d+)\s*,\s*"([\s\S]*?)"/g
+  const segments: StoryboardSegment[] = []
+  let idx = 0
+  let match: RegExpExecArray | null
+  while ((match = re.exec(text)) !== null) {
+    const shotNumber = Number(match[2])
+    const block = match[3].replace(/""/g, '"').trim()
+    const prompt = parsePromptBlock(block)
+    const promptText = block // 保留原始块文本（即三引号内容）
+
+    segments.push({
+      id: `shot-${shotNumber}-${idx}`,
+      shotNumber: Number.isFinite(shotNumber) ? shotNumber : idx + 1,
+      prompt,
+      promptText
+    })
+    idx++
+  }
+
+  return segments
+}
+
 export default function StoryboardWorkflowPage() {
   const [projectName, setProjectName] = useState('Storyboard Project')
   const [rawJson, setRawJson] = useState('')
@@ -384,6 +460,8 @@ export default function StoryboardWorkflowPage() {
   const [selectedForVideo, setSelectedForVideo] = useState<string[]>([])
   const [imageResults, setImageResults] = useState<Record<string, ImageResult>>({})
   const [videoPromptOverrides, setVideoPromptOverrides] = useState<Record<string, string>>({})
+  const [videoBulkFind, setVideoBulkFind] = useState('')
+  const [videoBulkReplace, setVideoBulkReplace] = useState('')
   const [isGeneratingImages, setIsGeneratingImages] = useState(false)
   const [imageProgress, setImageProgress] = useState(0)
   const [generatingShotIds, setGeneratingShotIds] = useState<Record<string, boolean>>({})
@@ -651,6 +729,58 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
     } catch (error) {
       console.error('Failed to parse storyboard JSON', error)
       setParseError('Failed to parse JSON. Please check the format.')
+      setSegments([])
+      setSelectedForImages([])
+      setSelectedForVideo([])
+      setImageResults({})
+      setVideoJobs({})
+      setVideoPromptOverrides({})
+    }
+  }, [rawJson, projectName])
+
+  const handleParseCsv = useCallback(async () => {
+    const input = rawJson.trim()
+    if (!input) {
+      setParseError('请提供 CSV 文本或上传 CSV 文件。')
+      setSegments([])
+      return
+    }
+
+    try {
+      const normalised = parseStoryboardCsv(input)
+      if (!normalised.length) {
+        throw new Error('未解析到任何分镜。请检查 CSV 格式（分镜数,分镜提示词）。')
+      }
+
+      setSegments(normalised)
+      setSelectedForImages(normalised.map(segment => segment.id))
+      setSelectedForVideo([])
+      setImageResults({})
+      setVideoJobs({})
+      setVideoPromptOverrides({})
+      setParseError(null)
+      setStatus({ type: 'success', text: `Parsed ${normalised.length} storyboard shots from CSV.` })
+
+      // Supabase 持久化（与 JSON 逻辑一致）
+      try {
+        const project = await createProject(projectName || 'Storyboard Project', 'Storyboard parsed from CSV in workbench')
+        setProjectId(project.id)
+        const scriptSegments: DbScriptSegment[] = normalised.map(s => ({
+          id: s.id,
+          scene: s.prompt?.subject?.action || s.prompt?.environment || '',
+          prompt: s.promptText,
+          characters: [],
+          setting: s.prompt?.environment || '',
+          mood: s.prompt?.time_of_day || ''
+        }))
+        const script = await createScript(project.id, scriptSegments)
+        setScriptId(script.id)
+      } catch (e) {
+        console.error('Failed to create project/script for Supabase (CSV)', e)
+      }
+    } catch (error) {
+      console.error('Failed to parse storyboard CSV', error)
+      setParseError('CSV 解析失败。请检查格式或尝试 JSON 解析。')
       setSegments([])
       setSelectedForImages([])
       setSelectedForVideo([])
@@ -1043,7 +1173,38 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
     }
   }, [segments, selectedForVideo, imageResults, videoPromptOverrides, veoModel, veoAspectRatio, veoEnhancePrompt, veoUpsample, useImageAsKeyframe, projectSlug, downloadImage, videoJobs])
 
-  const handleBulkDownloadImages = useCallback(async () => {
+  // 新增：批量替换 Video prompt 文本
+  const handleApplyVideoBulkReplace = useCallback((scope: any) => {
+    const find = videoBulkFind
+    const replace = videoBulkReplace
+    if (!find || find.length === 0) {
+      setStatus({ type: 'info', text: '请输入要查找的文本。' })
+      return
+    }
+
+    const targets = scope === 'selected'
+      ? segments.filter(s => selectedForVideo.includes(s.id))
+      : segments
+
+    if (!targets.length) {
+      setStatus({ type: 'info', text: scope === 'selected' ? '请先勾选要提交至 Veo3 的镜头。' : '没有可处理的镜头。' })
+      return
+    }
+
+    const nextOverrides: Record<string, string> = { ...videoPromptOverrides }
+    targets.forEach(seg => {
+      const img = imageResults[seg.id]
+      const base = (videoPromptOverrides[seg.id]?.trim())
+        || extractActionText(seg, img?.prompt)
+        || img?.prompt
+        || formatPromptForModel(seg)
+      nextOverrides[seg.id] = (base || '').split(find).join(replace)
+    })
+
+    setVideoPromptOverrides(nextOverrides)
+    setStatus({ type: 'success', text: `已对 ${targets.length} 个镜头的 Video prompt 执行批量替换。` })
+  }, [segments, selectedForVideo, imageResults, videoPromptOverrides, videoBulkFind, videoBulkReplace])
+   const handleBulkDownloadImages = useCallback(async () => {
     const slug = projectSlug || 'storyboard'
     const items = segments
       .map(s => ({ s, img: imageResults[s.id] }))
@@ -1056,19 +1217,42 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
 
     setIsDownloadingImages(true)
     try {
-      for (const { s, img } of items) {
-        const ext = extractFileExtension((img as any).url)
-        const filename = `${slug}-shot-${String(s.shotNumber).padStart(2, '0')}.${ext}`
-        await downloadImage((img as any).url, filename)
+      const payload = {
+        projectSlug: slug,
+        items: items.map(({ s, img }) => {
+          const customPrompt = videoPromptOverrides[s.id]?.trim()
+          const actionOnly = extractActionText(s, img?.prompt)
+          const promptForVideo = customPrompt && customPrompt.length > 0
+            ? customPrompt
+            : (actionOnly || img?.prompt || formatPromptForModel(s))
+          return {
+            shotNumber: s.shotNumber,
+            prompt: promptForVideo,
+            imageUrl: img?.url
+          }
+        })
       }
-      setStatus({ type: 'success', text: `Downloaded ${items.length} image${items.length === 1 ? '' : 's'} locally.` })
+
+      const resp = await fetch('/api/bulk-save-images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+
+      if (!resp.ok) {
+        const text = await resp.text()
+        throw new Error(`Bulk save failed: ${resp.status} ${text}`)
+      }
+
+      const data = await resp.json()
+      setStatus({ type: 'success', text: `Saved ${data.saved} images to ${data.project_dir}. Task: ${data.task_file}` })
     } catch (e) {
-      console.error('Bulk download failed', e)
-      setStatus({ type: 'error', text: 'Bulk download failed.' })
+      console.error('Bulk save images failed', e)
+      setStatus({ type: 'error', text: 'Bulk save images failed.' })
     } finally {
       setIsDownloadingImages(false)
     }
-  }, [segments, imageResults, projectSlug, downloadImage])
+  }, [segments, imageResults, projectSlug, videoPromptOverrides])
 
   const selectableSegments = useMemo(
     () =>
@@ -1120,13 +1304,13 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
       <section className="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">Step 1 - Load storyboard JSON</h2>
-            <p className="text-sm text-gray-500">Paste the JSON array or upload a file, then parse it to preview each shot.</p>
+            <h2 className="text-lg font-semibold text-gray-900">Step 1 - Load storyboard JSON/CSV</h2>
+            <p className="text-sm text-gray-500">Paste the JSON array or CSV text (shots,prompt), or upload a file, then parse to preview each shot.</p>
           </div>
           <div className="flex items-center gap-3">
             <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-blue-600 hover:text-blue-700">
-              <input type="file" accept="application/json" className="hidden" onChange={handleFileImport} />
-              Upload JSON file
+              <input type="file" accept=".json,.csv,application/json,text/csv" className="hidden" onChange={handleFileImport} />
+              Upload JSON/CSV file
             </label>
             <button
               type="button"
@@ -1135,13 +1319,20 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
             >
               Parse JSON
             </button>
+            <button
+              type="button"
+              onClick={handleParseCsv}
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              Parse CSV
+            </button>
           </div>
         </div>
         <textarea
           value={rawJson}
           onChange={event => setRawJson(event.target.value)}
           className="h-64 w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-          placeholder="Paste storyboard JSON array here"
+          placeholder="Paste storyboard JSON array or CSV text here"
         />
         {parseError && <p className="text-sm text-red-600">{parseError}</p>}
       </section>
@@ -1697,8 +1888,51 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
           </div>
         </div>
 
-        <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {segments.map(segment => {
+        {/* 新增：Veo3 区域的批量替换控件 */}
+         <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
+           <div className="flex flex-col gap-3 md:flex-row md:items-end md:gap-4">
+             <label className="text-sm text-gray-700">
+               查找
+               <input
+                 type="text"
+                 value={videoBulkFind}
+                 onChange={e => setVideoBulkFind(e.target.value)}
+                 className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="要查找的文本（作用于 Video prompt）"
+               />
+             </label>
+             <label className="text-sm text-gray-700">
+               替换为
+               <input
+                 type="text"
+                 value={videoBulkReplace}
+                 onChange={e => setVideoBulkReplace(e.target.value)}
+                 className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="替换文本"
+               />
+             </label>
+             <div className="flex gap-2">
+               <button
+                 type="button"
+                 onClick={() => handleApplyVideoBulkReplace('selected')}
+                 disabled={!videoBulkFind}
+                 className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+               >
+                 仅应用于已选镜头
+               </button>
+               <button
+                 type="button"
+                 onClick={() => handleApplyVideoBulkReplace('all')}
+                 disabled={!videoBulkFind}
+                 className="rounded-md bg-gray-800 px-3 py-2 text-sm font-medium text-white hover:bg-gray-900 disabled:cursor-not-allowed disabled:opacity-60"
+               >
+                 应用于全部镜头
+               </button>
+             </div>
+           </div>
+         </div>
+         <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+           {segments.map(segment => {
             const image = imageResults[segment.id]
             const job = videoJobs[segment.id]
             const actionPrompt = extractActionText(segment, image?.prompt)
