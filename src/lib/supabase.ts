@@ -14,14 +14,19 @@ const isValidKey = supabaseAnonKey && supabaseAnonKey !== 'your_supabase_anon_ke
 // Create a mock client for demo mode
 const createMockClient = () => ({
   from: () => ({
-    select: () => ({ 
-      eq: () => ({ 
-        order: () => ({ 
-          data: [], 
-          error: null 
-        }) 
-      }) 
-    }),
+    select: () => {
+      const builder = {
+        data: [] as never[],
+        error: null as null,
+        eq: () => builder,
+        order: () => builder,
+        maybeSingle: () => ({
+          data: null,
+          error: null
+        })
+      }
+      return builder
+    },
     insert: () => ({ 
       select: () => ({ 
         single: () => ({ 
@@ -29,6 +34,14 @@ const createMockClient = () => ({
           error: null 
         }) 
       }) 
+    }),
+    upsert: () => ({
+      select: () => ({
+        single: () => ({
+          data: null,
+          error: null
+        })
+      })
     }),
     update: () => ({ 
       eq: () => ({ 
@@ -39,6 +52,14 @@ const createMockClient = () => ({
           })
         })
       }) 
+    }),
+    delete: () => ({
+      eq: () => ({
+        eq: () => ({
+          data: null,
+          error: null
+        })
+      })
     })
   })
 })
@@ -53,4 +74,4 @@ if (isDemoMode) {
   console.warn('   3. Update NEXT_PUBLIC_SUPABASE_ANON_KEY in your .env.local file')
 }
 
-export const supabase = isDemoMode ? createMockClient() : createClient(supabaseUrl, supabaseAnonKey)
+export const supabase = (isDemoMode ? createMockClient() : createClient(supabaseUrl, supabaseAnonKey)) as any
