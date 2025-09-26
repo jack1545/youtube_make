@@ -1,10 +1,11 @@
 'use client'
 
-import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { generateBatchImages } from '@/lib/doubao'
 import { createVeo3Job } from '@/lib/veo3'
 import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus } from '@/lib/db'
 import type { ReferenceImage, ScriptSegment as DbScriptSegment } from '@/lib/types'
+import { supabase, isDemoMode } from '@/lib/supabase'
 
 // 查询 Veo3 任务详情，返回可能包含 video_url 的结构
 async function fetchVeo3Detail(taskId: string) {
@@ -244,11 +245,7 @@ function resolvePromptText(
   rawPrompt: unknown,
   shotNumber?: number
 ): string {
-  const formatted = stringifyPromptDetails(prompt)
-  if (formatted) {
-    return formatted
-  }
-
+  // 优先使用原始字符串，不再把结构化提示词自动转为 JSON
   if (typeof rawPrompt === 'string') {
     const trimmed = rawPrompt.trim()
     if (trimmed) {
@@ -256,17 +253,7 @@ function resolvePromptText(
     }
   }
 
-  if (rawPrompt && typeof rawPrompt === 'object') {
-    try {
-      const serialised = JSON.stringify(rawPrompt, null, 2)
-      if (serialised) {
-        return serialised
-      }
-    } catch {
-      // ignore parse errors
-    }
-  }
-
+  // 不再将对象序列化为 JSON 作为展示文本，避免干扰手动编辑
   if (typeof shotNumber === 'number') {
     return `Shot ${shotNumber}`
   }
@@ -275,14 +262,17 @@ function resolvePromptText(
 }
 
 function formatPromptForModel(segment: StoryboardSegment): string {
+  // 优先使用用户编辑的纯文本
+  if (segment.promptText && segment.promptText.trim().length > 0) {
+    return segment.promptText.trim()
+  }
+
+  // 纯文本为空时，回退到结构化提示词
   if (segment.prompt) {
     return stringifyPromptDetails(segment.prompt)
   }
 
-  if (segment.promptText) {
-    return segment.promptText
-  }
-
+  // 最后回退到基础信息
   const lines = [`Shot ${segment.shotNumber}`]
   if (segment.duration) {
     lines.push(`Duration: ${segment.duration}`)
@@ -478,6 +468,30 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [newReferenceUrl, setNewReferenceUrl] = useState('')
   const [newReferenceLabel, setNewReferenceLabel] = useState('')
   const [isAddingReference, setIsAddingReference] = useState(false)
+  const [isStep2Stuck, setIsStep2Stuck] = useState(false)
+  const step2SentinelRef = useRef<HTMLDivElement | null>(null)
+  const step2SectionRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    const sentinel = step2SentinelRef.current
+    if (!sentinel) return
+    const topOffsetPx = 64 // 对应 top-16
+    const observer = new IntersectionObserver(
+      entries => {
+        const entry = entries[0]
+        setIsStep2Stuck(!entry.isIntersecting)
+      },
+      {
+        root: null,
+        threshold: 0,
+        rootMargin: `-${topOffsetPx}px 0px 0px 0px`
+      }
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [])
+  const [newReferenceFile, setNewReferenceFile] = useState<File | null>(null)
+  const [isUploadingReference, setIsUploadingReference] = useState(false)
 
   const [bulkFind, setBulkFind] = useState('')
   const [bulkReplaceValue, setBulkReplaceValue] = useState('')
@@ -895,6 +909,60 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
     }
   }, [])
 
+  const fileToDataUrl = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = reject
+      reader.readAsDataURL(file)
+    })
+  }
+
+  const handleUploadReferenceImage = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const file = newReferenceFile
+    if (!file) {
+      setStatus({ type: 'error', text: '请选择要上传的图片文件。' })
+      return
+    }
+    setIsUploadingReference(true)
+    try {
+      let finalUrl: string | null = null
+      let usedDataUrlFallback = false
+      if (!isDemoMode && (supabase as any)?.storage) {
+        try {
+          const ext = (file.name.split('.').pop() || 'png').toLowerCase()
+          const path = `reference-images/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`
+          const { error: uploadError } = await supabase.storage
+            .from('reference-images')
+            .upload(path, file, { upsert: false, contentType: file.type || `image/${ext}` })
+          if (uploadError) {
+            throw uploadError
+          }
+          const { data: publicData } = supabase.storage.from('reference-images').getPublicUrl(path)
+          finalUrl = publicData?.publicUrl || null
+        } catch (err) {
+          console.warn('Supabase Storage upload failed (bucket missing?), falling back to Data URL.', err)
+        }
+      }
+      if (!finalUrl) {
+        finalUrl = await fileToDataUrl(file)
+        usedDataUrlFallback = true
+      }
+      const image = await addReferenceImage(finalUrl, newReferenceLabel.trim() || undefined)
+      setReferenceImages(prev => [image, ...prev])
+      setSelectedReferenceIds(prev => [image.id, ...prev])
+      setNewReferenceFile(null)
+      setNewReferenceLabel('')
+      setStatus({ type: 'success', text: usedDataUrlFallback ? '参考图已上传（使用本地 Data URL）。' : '参考图已上传。' })
+    } catch (error) {
+      console.error('Failed to upload reference image', error)
+      setStatus({ type: 'error', text: '上传参考图失败。' })
+    } finally {
+      setIsUploadingReference(false)
+    }
+  }, [newReferenceFile, newReferenceLabel])
+
   const toggleReferenceSelection = useCallback((id: string) => {
     setSelectedReferenceIds(prev => (prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]))
   }, [])
@@ -1288,6 +1356,14 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
         </div>
       </header>
 
+      {/* Floating right-side step tabs */}
+      <nav className="fixed right-4 top-1/2 z-40 hidden -translate-y-1/2 flex-col space-y-2 md:flex">
+        <a href="#step-1" className="rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 1 解析提示词</a>
+        <a href="#step-2" className="rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 2 参考图 | 分镜图</a>
+        <a href="#step-3" className="rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 3 设置图片</a>
+        <a href="#step-4" className="rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 4 生成视频</a>
+      </nav>
+
       {status && (
         <div
           className={`rounded-lg border px-4 py-3 text-sm ${
@@ -1304,7 +1380,7 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
       <section className="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">Step 1 - Load storyboard JSON/CSV</h2>
+            <h2 id="step-1" className="text-lg font-semibold text-gray-900">Step 1 - Load storyboard JSON/CSV</h2>
             <p className="text-sm text-gray-500">Paste the JSON array or CSV text (shots,prompt), or upload a file, then parse to preview each shot.</p>
           </div>
           <div className="flex items-center gap-3">
@@ -1337,11 +1413,13 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
         {parseError && <p className="text-sm text-red-600">{parseError}</p>}
       </section>
 
-      <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">Step 2 - Preview shots</h2>
-          {hasSegments && <span className="text-xs text-gray-500">{segments.length} shots</span>}
-        </div>
+      <div ref={step2SentinelRef} aria-hidden className="h-16" />
+ 
+       <section ref={step2SectionRef} className={`sticky top-16 z-30 rounded-lg border border-gray-200 bg-white p-6 shadow-sm ${isStep2Stuck ? 'opacity-90' : ''}`}>
+         <div className="flex items-center justify-between">
+           <h2 id="step-2" className="text-lg font-semibold text-gray-900">Step 2 - Preview shots</h2>
+           {hasSegments && <span className="text-xs text-gray-500">{segments.length} shots</span>}
+         </div>
 
         {/* Reference images (选择与预览) */}
         {referenceImages.length > 0 && (
@@ -1394,7 +1472,7 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
             )}
           </div>
         )}
-        {hasSegments && (
+        {hasSegments && !isStep2Stuck && (
           <div className="mt-4 space-y-3 rounded-md border border-gray-200 bg-gray-50 p-4">
             <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
               <p className="text-sm font-medium text-gray-700">Bulk replace text in the preview shots</p>
@@ -1515,40 +1593,7 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
                   <summary className="cursor-pointer select-none text-xs text-blue-600 hover:underline">编辑 Shot 文本</summary>
                   <div className="mt-2 space-y-2">
                     <div>
-                      <label htmlFor={`shot-action-${segment.id}`} className="block text-xs font-medium text-gray-600">Action 文本（仅用于 Veo3）</label>
-                      <input
-                        id={`shot-action-${segment.id}`}
-                        type="text"
-                        value={extractActionText(segment, imageRecord?.prompt) || ''}
-                        onChange={e => {
-                          const nextValue = e.target.value
-                          setSegments(prev => prev.map(s => {
-                            if (s.id !== segment.id) return s
-                            const currentPrompt: any = s.prompt ? { ...s.prompt } : {}
-                            const currentSubject: any = currentPrompt.subject ? { ...currentPrompt.subject } : {}
-                            const trimmed = nextValue.trim()
-                            if (trimmed) {
-                              currentSubject.action = trimmed
-                            } else {
-                              delete currentSubject.action
-                            }
-                            if (Object.keys(currentSubject).length > 0) {
-                              currentPrompt.subject = currentSubject
-                            } else {
-                              delete currentPrompt.subject
-                            }
-                            const nextPrompt: any = Object.keys(currentPrompt).length > 0 ? currentPrompt : undefined
-                            const nextPromptText = stringifyPromptDetails(nextPrompt)
-                            return { ...s, prompt: nextPrompt, promptText: nextPromptText || s.promptText }
-                          }))
-                        }}
-                        className="w-full rounded-md border border-gray-300 px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="例如：店员从店内走出，脸上带着不耐烦的表情"
-                      />
-                      <p className="mt-1 text-[11px] text-gray-500">会作为 Video prompt 默认值，也会同步更新结构化 action 字段。</p>
-                    </div>
-                    <div>
-                      <label htmlFor={`shot-text-${segment.id}`} className="block text-xs font-medium text-gray-600">Shot 文本（JSON）</label>
+                      <label htmlFor={`shot-text-${segment.id}`} className="block text-xs font-medium text-gray-600">Shot 文本</label>
                       <textarea
                         id={`shot-text-${segment.id}`}
                         value={segment.promptText}
@@ -1556,8 +1601,31 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
                           const updated = { ...segment, promptText: e.target.value }
                           setSegments(prev => prev.map(s => (s.id === segment.id ? updated : s)))
                         }}
-                        className="h-24 w-full rounded-md border border-gray-300 px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="可直接编辑 JSON 结构"
+                        className="h-24 w-full rounded-md border border-gray-300 px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="可直接编辑文本"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor={`shot-characters-${segment.id}`} className="block text-xs font-medium text-gray-600">Characters（角色）</label>
+                      <input
+                        id={`shot-characters-${segment.id}`}
+                        type="text"
+                        value={segment.prompt?.subject?.characters_present ?? ''}
+                        onChange={e => {
+                          const updated = {
+                            ...segment,
+                            prompt: {
+                              ...(segment.prompt ?? {}),
+                              subject: {
+                                ...(segment.prompt?.subject ?? {}),
+                                characters_present: e.target.value
+                              }
+                            }
+                          }
+                          setSegments(prev => prev.map(s => (s.id === segment.id ? updated : s)))
+                        }}
+                        className="w-full rounded-md border border-gray-300 px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="例如：角色A，角色B（可逗号分隔）"
                       />
                     </div>
                   </div>
@@ -1600,7 +1668,7 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
       <section className="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">Step 3 - Generate Doubao images</h2>
+            <h2 id="step-3" className="text-lg font-semibold text-gray-900">Step 3 - Generate Doubao images</h2>
             <p className="text-sm text-gray-500">Choose aspect ratio, resolution, and optional reference images before generating.</p>
           </div>
           <div className="text-sm text-gray-600">
@@ -1756,6 +1824,29 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
                   {isAddingReference ? 'Saving...' : 'Add reference'}
                 </button>
               </form>
+
+              <form onSubmit={handleUploadReferenceImage} className="grid gap-3 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_auto]">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={e => setNewReferenceFile(e.target.files?.[0] ?? null)}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <input
+                  type="text"
+                  value={newReferenceLabel}
+                  onChange={event => setNewReferenceLabel(event.target.value)}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Optional label"
+                />
+                <button
+                  type="submit"
+                  disabled={isUploadingReference}
+                  className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isUploadingReference ? 'Uploading…' : 'Upload local image'}
+                </button>
+              </form>
               <div className="flex flex-wrap gap-2">
                 {referenceImages.length ? (
                   referenceImages.map(image => {
@@ -1814,7 +1905,7 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
       <section className="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">Step 4 - Submit Veo3 videos</h2>
+            <h2 id="step-4" className="text-lg font-semibold text-gray-900">Step 4 - Submit Veo3 videos</h2>
             <p className="text-sm text-gray-500">Select the shots you want to convert to video. Unselected images will be downloaded using the project name.</p>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-sm text-gray-600">
@@ -1994,6 +2085,61 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
                 {image && (
                   <p className="text-[11px] text-gray-500">Doubao prompt: {image.prompt}</p>
                 )}
+
+                {/* 新增：打开 Doubao 的按钮，携带当前 Shot 的图片与提示词 */}
+                <div className="mt-2 space-y-2">
+                  <button
+                    type="button"
+                    className="rounded-md bg-orange-600 px-3 py-1 text-xs font-medium text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={!image}
+                    onClick={async () => {
+                      if (!image) return
+                      // 1) 将分镜图片写入系统剪贴板（Blob），便于到豆包后按 Ctrl+V 粘贴
+                      try {
+                        const res = await fetch(image.url, { mode: 'cors' })
+                        const blob = await res.blob()
+                        await navigator.clipboard.write([
+                          new ClipboardItem({ [blob.type]: blob })
+                        ])
+                        console.log('Copied storyboard image blob to clipboard')
+                      } catch (err) {
+                        console.warn('Failed to copy image blob to clipboard, falling back to URL text', err)
+                        try {
+                          await navigator.clipboard.writeText(image.url)
+                          console.log('Copied image URL to clipboard as fallback')
+                        } catch (err2) {
+                          console.warn('Clipboard writeText failed', err2)
+                        }
+                      }
+
+                      // 2) 组织提示词并打开豆包，扩展负责输入 / 激活视频生成与粘贴提示词
+                      const actionPrompt = extractActionText(segment, image?.prompt)
+                      const promptFallback = actionPrompt || image?.prompt || formatPromptForModel(segment)
+                      const pv = videoPromptOverrides[segment.id] ?? promptFallback
+                      const payload = {
+                        source: 'creative-workbench',
+                        shotId: segment.id,
+                        shotNumber: segment.shotNumber,
+                        imageUrl: image.url,
+                        prompt: pv,
+                        semiAuto: true
+                      }
+                      const encoded = encodeURIComponent(
+                        btoa(
+                          Array.from(new TextEncoder().encode(JSON.stringify(payload)))
+                            .map(b => String.fromCharCode(b))
+                            .join('')
+                        )
+                      )
+                      const targetUrl = `https://www.doubao.com/?cw=${encoded}`
+                      window.open(targetUrl, '_blank', 'noopener')
+                    }}
+                    title="打开 Doubao 并由浏览器扩展自动提交视频生成（需安装扩展）"
+                  >
+                    Doubao video
+                  </button>
+
+                </div>
 
                 {/* Veo3 任务状态与视频播放 */}
                 {job && (
