@@ -125,6 +125,119 @@ export async function getProjects(): Promise<Project[]> {
   return data || []
 }
 
+export async function deleteProject(projectId: string): Promise<void> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    // Remove project (mutate const arrays via splice)
+    for (let i = demoProjects.length - 1; i >= 0; i--) {
+      if (demoProjects[i].id === projectId && demoProjects[i].user_id === user.id) {
+        demoProjects.splice(i, 1)
+      }
+    }
+    // Collect related script ids
+    const scriptIds = demoScripts.filter(s => s.project_id === projectId).map(s => s.id)
+    // Remove scripts
+    for (let i = demoScripts.length - 1; i >= 0; i--) {
+      if (demoScripts[i].project_id === projectId) {
+        demoScripts.splice(i, 1)
+      }
+    }
+    // Remove generated images linked to scripts
+    for (let i = demoImages.length - 1; i >= 0; i--) {
+      if (scriptIds.includes(demoImages[i].script_id)) {
+        demoImages.splice(i, 1)
+      }
+    }
+    // Remove generated videos linked to scripts
+    for (let i = demoVideos.length - 1; i >= 0; i--) {
+      const scriptId = demoVideos[i].script_id
+      if (scriptId && scriptIds.includes(scriptId)) {
+        demoVideos.splice(i, 1)
+      }
+    }
+    return
+  }
+
+  // Supabase delete cascade: images -> videos -> scripts -> project
+  // Fetch script ids for project
+  const { data: scriptRows, error: scriptQueryErr } = await supabase
+    .from('scripts')
+    .select('id')
+    .eq('project_id', projectId)
+
+  if (scriptQueryErr?.code === 'PGRST205') {
+    console.warn("Supabase table 'public.scripts' missing; using local demo storage.")
+    // Fallback to demo mutation
+    const scriptIds = demoScripts.filter(s => s.project_id === projectId).map(s => s.id)
+    for (let i = demoProjects.length - 1; i >= 0; i--) {
+      if (demoProjects[i].id === projectId && demoProjects[i].user_id === user.id) {
+        demoProjects.splice(i, 1)
+      }
+    }
+    for (let i = demoScripts.length - 1; i >= 0; i--) {
+      if (demoScripts[i].project_id === projectId) {
+        demoScripts.splice(i, 1)
+      }
+    }
+    for (let i = demoImages.length - 1; i >= 0; i--) {
+      if (scriptIds.includes(demoImages[i].script_id)) {
+        demoImages.splice(i, 1)
+      }
+    }
+    for (let i = demoVideos.length - 1; i >= 0; i--) {
+      const sid = demoVideos[i].script_id
+      if (sid && scriptIds.includes(sid)) {
+        demoVideos.splice(i, 1)
+      }
+    }
+    return
+  }
+
+  if (scriptQueryErr) throw scriptQueryErr
+
+  const scriptIds = (scriptRows || []).map(r => r.id)
+
+  if (scriptIds.length > 0) {
+    const { error: imgDelErr } = await supabase
+      .from('generated_images')
+      .delete()
+      .in('script_id', scriptIds)
+    if (imgDelErr && imgDelErr.code !== 'PGRST205') throw imgDelErr
+
+    const { error: vidDelErr } = await supabase
+      .from('generated_videos')
+      .delete()
+      .in('script_id', scriptIds)
+    if (vidDelErr && vidDelErr.code !== 'PGRST205') throw vidDelErr
+
+    const { error: scriptsDelErr } = await supabase
+      .from('scripts')
+      .delete()
+      .eq('project_id', projectId)
+    if (scriptsDelErr && scriptsDelErr.code !== 'PGRST205') throw scriptsDelErr
+  }
+
+  const { error: projDelErr } = await supabase
+    .from('projects')
+    .delete()
+    .eq('id', projectId)
+    .eq('user_id', user.id)
+
+  if (projDelErr?.code === 'PGRST205') {
+    console.warn("Supabase table 'public.projects' missing; using local demo storage.")
+    // Fallback mutate local demo
+    for (let i = demoProjects.length - 1; i >= 0; i--) {
+      if (demoProjects[i].id === projectId && demoProjects[i].user_id === user.id) {
+        demoProjects.splice(i, 1)
+      }
+    }
+    return
+  }
+
+  if (projDelErr) throw projDelErr
+}
+
 // 脚本相关操作
 export async function createScript(projectId: string, content: ScriptSegment[]): Promise<Script> {
   if (isDemoMode) {
@@ -342,19 +455,30 @@ export async function getReferenceImages(): Promise<ReferenceImage[]> {
     return demoReferenceImages.filter(img => img.user_id === user.id)
   }
 
-  const { data, error } = await supabase
-    .from('reference_images')
-    .select('*')
-    .eq('user_id', user.id)
-    .order('created_at', { ascending: false })
+  try {
+    const { data, error } = await supabase
+      .from('reference_images')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
 
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.reference_images' missing; using local demo storage.")
-    return demoReferenceImages.filter(img => img.user_id === user.id)
+    if (error?.code === 'PGRST205') {
+      console.warn("Supabase table 'public.reference_images' missing; using local demo storage.")
+      return demoReferenceImages.filter(img => img.user_id === user.id)
+    }
+
+    if (error) {
+      // Be tolerant to unexpected error shapes (e.g., empty object {}) and avoid throwing to not break UI
+      console.warn('Supabase error while fetching reference_images, returning empty list instead of throwing:', error)
+      return []
+    }
+
+    return data || []
+  } catch (e) {
+    // Catch-all safeguard to prevent empty-object throws from bubbling to UI
+    console.warn('Exception while fetching reference_images, returning empty list:', e)
+    return []
   }
-
-  if (error) throw error
-  return data || []
 }
 
 export async function removeReferenceImage(id: string): Promise<void> {
