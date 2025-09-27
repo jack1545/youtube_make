@@ -81,7 +81,7 @@ export default async function HistoryPage() {
                       <p className="text-sm text-gray-500 mt-2">暂无图片</p>
                     ) : (
                       <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-                        {images.map(img => (
+                        {images.map((img, idx) => (
                           <div key={img.id} className="group rounded overflow-hidden border bg-gray-50 hover:shadow">
                             <a
                               href={img.image_url}
@@ -98,6 +98,7 @@ export default async function HistoryPage() {
                               />
                             </a>
                             <div className="p-2">
+                              <p className="text-[10px] text-gray-500">Shot {img.shot_number ?? (idx + 1)}</p>
                               <p className="line-clamp-2 text-xs text-gray-600">{img.prompt}</p>
                               <p className="text-[10px] text-gray-400 mt-1">{new Date(img.created_at).toLocaleString()}</p>
                               <div className="mt-1">
@@ -117,10 +118,20 @@ export default async function HistoryPage() {
                       <p className="text-sm text-gray-500 mt-2">暂无视频</p>
                     ) : (
                       <ul className="mt-2 space-y-2">
-                        {videos.map(v => (
+                        {([...videos]
+                          .sort((a, b) => {
+                            const an = a.shot_number ?? Number.MAX_SAFE_INTEGER
+                            const bn = b.shot_number ?? Number.MAX_SAFE_INTEGER
+                            if (an !== bn) return an - bn
+                            return new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+                          })
+                        ).map((v, idx) => (
                           <li key={v.id} className="flex items-center justify-between rounded border p-3 hover:bg-gray-50">
                             <div className="min-w-0 pr-4">
-                              <p className="text-sm text-gray-800 truncate">{v.prompt}</p>
+                              <div className="flex items-center gap-2">
+                                <span className="inline-flex items-center rounded bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600">Shot {v.shot_number ?? (idx + 1)}</span>
+                                <p className="text-sm text-gray-800 truncate">{v.prompt}</p>
+                              </div>
                               <p className="text-xs text-gray-500 mt-1">
                                 状态：{v.status} · {new Date(v.created_at).toLocaleString()}
                               </p>

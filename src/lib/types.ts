@@ -47,6 +47,7 @@ export interface GeneratedImage {
   prompt: string
   image_url: string
   status: 'pending' | 'generating' | 'completed' | 'failed'
+  shot_number?: number
   created_at: string
 }
 
@@ -74,5 +75,6 @@ export interface GeneratedVideo {
   prompt: string
   video_url: string
   status: 'pending' | 'processing' | 'completed' | 'failed'
+  shot_number?: number
   created_at: string
 }

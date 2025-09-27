@@ -196,7 +196,7 @@ export async function deleteProject(projectId: string): Promise<void> {
 
   if (scriptQueryErr) throw scriptQueryErr
 
-  const scriptIds = (scriptRows || []).map(r => r.id)
+  const scriptIds = (scriptRows || []).map((r: { id: string }) => r.id)
 
   if (scriptIds.length > 0) {
     const { error: imgDelErr } = await supabase
@@ -338,7 +338,8 @@ export async function updateScript(id: string, content: ScriptSegment[]): Promis
 export async function createGeneratedImage(
   scriptId: string,
   prompt: string,
-  imageUrl: string
+  imageUrl: string,
+  shotNumber?: number
 ): Promise<GeneratedImage> {
   if (isDemoMode) {
     const image: GeneratedImage = {
@@ -347,6 +348,7 @@ export async function createGeneratedImage(
       prompt,
       image_url: imageUrl,
       status: 'completed',
+      shot_number: shotNumber,
       created_at: new Date().toISOString()
     }
     demoImages.unshift(image)
@@ -360,6 +362,7 @@ export async function createGeneratedImage(
       prompt,
       image_url: imageUrl,
       status: 'completed',
+      shot_number: shotNumber,
       created_at: new Date().toISOString()
     })
     .select()
@@ -393,12 +396,24 @@ export async function getGeneratedImages(scriptId: string): Promise<GeneratedIma
     .from('generated_images')
     .select('*')
     .eq('script_id', scriptId)
+    .order('shot_number', { ascending: true, nullsFirst: false })
     .order('created_at', { ascending: true })
 
   // Fallback to demo storage if table missing
   if (error?.code === 'PGRST205') {
     console.warn("Supabase table 'public.generated_images' missing; using local demo storage.")
     return demoImages.filter(img => img.script_id === scriptId)
+  }
+
+  // Column missing fallback: Supabase returns 42703 when 'shot_number' column isn't yet migrated
+  if (error?.code === '42703') {
+    const { data: data2, error: err2 } = await supabase
+      .from('generated_images')
+      .select('*')
+      .eq('script_id', scriptId)
+      .order('created_at', { ascending: true })
+    if (err2) throw err2
+    return data2 || []
   }
 
   if (error) throw error
@@ -608,6 +623,7 @@ export async function createGeneratedVideo(
   imageUrl: string,
   prompt: string,
   scriptId: string | null = null,
+  shotNumber?: number,
   status: GeneratedVideo['status'] = 'pending',
   videoUrl = ''
 ): Promise<GeneratedVideo> {
@@ -622,6 +638,7 @@ export async function createGeneratedVideo(
       prompt,
       video_url: videoUrl,
       status,
+      shot_number: shotNumber,
       created_at: new Date().toISOString()
     }
     demoVideos.unshift(video)
@@ -637,6 +654,7 @@ export async function createGeneratedVideo(
       prompt,
       video_url: videoUrl,
       status,
+      shot_number: shotNumber,
       created_at: new Date().toISOString()
     })
     .select()
@@ -712,7 +730,8 @@ export async function getGeneratedVideos(scriptId?: string): Promise<GeneratedVi
     .from('generated_videos')
     .select('*')
     .eq('user_id', user.id)
-    .order('created_at', { ascending: false })
+    .order('shot_number', { ascending: true, nullsFirst: false })
+    .order('created_at', { ascending: true })
 
   if (scriptId) {
     query = query.eq('script_id', scriptId)
@@ -726,6 +745,55 @@ export async function getGeneratedVideos(scriptId?: string): Promise<GeneratedVi
     return scriptId ? videos.filter(video => video.script_id === scriptId) : videos
   }
 
+  // Column missing fallback: Supabase returns 42703 when 'shot_number' column isn't yet migrated
+  if (error?.code === '42703') {
+    let query2 = supabase
+      .from('generated_videos')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: true })
+    if (scriptId) {
+      query2 = query2.eq('script_id', scriptId)
+    }
+    const { data: data2, error: err2 } = await query2
+    if (err2) throw err2
+    return data2 || []
+  }
+
   if (error) throw error
   return data || []
+}
+
+export async function updateProjectName(projectId: string, name: string): Promise<Project> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    const idx = demoProjects.findIndex(p => p.id === projectId && p.user_id === user.id)
+    if (idx !== -1) {
+      demoProjects[idx].name = name
+      return demoProjects[idx]
+    }
+    throw new Error('Project not found')
+  }
+
+  const { data, error } = await supabase
+    .from('projects')
+    .update({ name })
+    .eq('id', projectId)
+    .eq('user_id', user.id)
+    .select()
+    .single()
+
+  if (error?.code === 'PGRST205') {
+    console.warn("Supabase table 'public.projects' missing; using local demo storage.")
+    const idx = demoProjects.findIndex(p => p.id === projectId && p.user_id === user.id)
+    if (idx !== -1) {
+      demoProjects[idx].name = name
+      return demoProjects[idx]
+    }
+    throw new Error('Project not found')
+  }
+
+  if (error) throw error
+  return data as Project
 }

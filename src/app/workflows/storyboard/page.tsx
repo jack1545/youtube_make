@@ -3,8 +3,8 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { generateBatchImages } from '@/lib/doubao'
 import { createVeo3Job } from '@/lib/veo3'
-import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus } from '@/lib/db'
-import type { ReferenceImage, ScriptSegment as DbScriptSegment } from '@/lib/types'
+import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject } from '@/lib/db'
+import type { ReferenceImage, ScriptSegment as DbScriptSegment, Project, Script, GeneratedImage, GeneratedVideo } from '@/lib/types'
 import { supabase, isDemoMode } from '@/lib/supabase'
 
 // 查询 Veo3 任务详情，返回可能包含 video_url 的结构
@@ -145,17 +145,39 @@ function normalizeSubject(subjectValue: unknown, fallbackSource: Record<string, 
     'charactersPresent',
     'characters',
     'roles',
-    'cast'
+    'cast',
+    // Chinese synonyms
+    '角色',
+    '人物',
+    '人物角色',
+    '出场角色',
+    '角色出现',
+    '角色名'
   ])
 
   const expression = pickFirstString(sources, [
     'expression',
     'facial_expression',
     'mood',
-    'emotion'
+    'emotion',
+    // Chinese synonyms
+    '表情',
+    '神情',
+    '情绪',
+    '心情'
   ])
 
-  const action = pickFirstString(sources, ['action', 'pose', 'movement'])
+  const action = pickFirstString(sources, [
+    'action',
+    'pose',
+    'movement',
+    // Chinese synonyms
+    '动作',
+    '行为',
+    '姿势',
+    '举止',
+    '动作描述'
+  ])
 
   const subject: StoryboardSubject = {}
   if (characters) {
@@ -196,7 +218,18 @@ function normalizePromptValue(raw: unknown): StoryboardPrompt | undefined {
   const source = raw as Record<string, unknown>
 
   const subject = normalizeSubject(
-    source['subject'] ?? source['Subject'] ?? source['subject_detail'] ?? source['subjectDetail'],
+    source['subject'] ??
+      source['Subject'] ??
+      source['subject_detail'] ??
+      source['subjectDetail'] ??
+      // Chinese synonyms
+      source['主体'] ??
+      source['人物'] ??
+      source['角色'] ??
+      source['主角'] ??
+      source['对象'] ??
+      source['被摄体'] ??
+      source['被摄主体'],
     source
   )
 
@@ -205,27 +238,75 @@ function normalizePromptValue(raw: unknown): StoryboardPrompt | undefined {
     prompt.subject = subject
   }
 
-  const environment = pickFirstString([source], ['environment', 'Environment', 'setting', 'location'])
+  const environment = pickFirstString([source], [
+    'environment',
+    'Environment',
+    'setting',
+    'location',
+    // Chinese synonyms
+    '环境',
+    '场景',
+    '背景',
+    '地点',
+    '位置'
+  ])
   if (environment) {
     prompt.environment = environment
   }
 
-  const timeOfDay = pickFirstString([source], ['time_of_day', 'timeOfDay', 'time', 'day_part', 'dayTime'])
+  const timeOfDay = pickFirstString([source], [
+    'time_of_day',
+    'timeOfDay',
+    'time',
+    'day_part',
+    'dayTime',
+    // Chinese synonyms
+    '时间',
+    '时段',
+    '一天中的时间'
+  ])
   if (timeOfDay) {
     prompt.time_of_day = timeOfDay
   }
 
-  const weather = pickFirstString([source], ['weather', 'Weather', 'conditions', 'climate'])
+  const weather = pickFirstString([source], [
+    'weather',
+    'Weather',
+    'conditions',
+    'climate',
+    // Chinese synonyms
+    '天气',
+    '气候'
+  ])
   if (weather) {
     prompt.weather = weather
   }
 
-  const cameraAngle = pickFirstString([source], ['camera_angle', 'cameraAngle', 'angle', 'shot_angle'])
+  const cameraAngle = pickFirstString([source], [
+    'camera_angle',
+    'cameraAngle',
+    'angle',
+    'shot_angle',
+    // Chinese synonyms
+    '机位',
+    '镜头角度',
+    '拍摄角度',
+    '视角'
+  ])
   if (cameraAngle) {
     prompt.camera_angle = cameraAngle
   }
 
-  const shotSize = pickFirstString([source], ['shot_size', 'shotSize', 'framing', 'frame'])
+  const shotSize = pickFirstString([source], [
+    'shot_size',
+    'shotSize',
+    'framing',
+    'frame',
+    // Chinese synonyms
+    '景别',
+    '镜头远近',
+    '画面大小'
+  ])
   if (shotSize) {
     prompt.shot_size = shotSize
   }
@@ -240,12 +321,29 @@ function stringifyPromptDetails(prompt?: StoryboardPrompt): string {
   return JSON.stringify({ prompt }, null, 2)
 }
 
+// 新增：将结构化提示词格式化为中文分段文本，便于在 Preview shots 展示
+function formatPromptChinese(prompt?: StoryboardPrompt): string {
+  if (!prompt) {
+    return '[主体]\n角色：无\n表情：无\n动作：无\n[环境]\n无\n[时间]\n无\n[天气]\n无\n[视角]\n无\n[景别]\n无'
+  }
+  const subject = prompt.subject || {}
+  const characters = (subject.characters_present || '').trim() || '无'
+  const expression = (subject.expression || '').trim() || '无'
+  const action = (subject.action || '').trim() || '无'
+  const environment = (prompt.environment || '').trim() || '无'
+  const time = (prompt.time_of_day || '').trim() || '无'
+  const weather = (prompt.weather || '').trim() || '无'
+  const angle = (prompt.camera_angle || '').trim() || '无'
+  const size = (prompt.shot_size || '').trim() || '无'
+  return `[主体]\n角色：${characters}\n表情：${expression}\n动作：${action}\n[环境]\n${environment}\n[时间]\n${time}\n[天气]\n${weather}\n[视角]\n${angle}\n[景别]\n${size}`
+}
+
 function resolvePromptText(
   prompt: StoryboardPrompt | undefined,
   rawPrompt: unknown,
   shotNumber?: number
 ): string {
-  // 优先使用原始字符串，不再把结构化提示词自动转为 JSON
+  // 优先使用原始字符串
   if (typeof rawPrompt === 'string') {
     const trimmed = rawPrompt.trim()
     if (trimmed) {
@@ -253,7 +351,11 @@ function resolvePromptText(
     }
   }
 
-  // 不再将对象序列化为 JSON 作为展示文本，避免干扰手动编辑
+  // 如果有结构化 prompt，则格式化为中文分段文本
+  if (prompt) {
+    return formatPromptChinese(prompt)
+  }
+
   if (typeof shotNumber === 'number') {
     return `Shot ${shotNumber}`
   }
@@ -313,6 +415,118 @@ function safeParseJSON<T = any>(text?: string | null): T | null {
     return null
   }
 }
+
+// 兼容性解析辅助：去掉 Markdown 代码块包裹
+function stripMarkdownCodeFences(text?: string | null): string {
+  if (!text || typeof text !== 'string') return ''
+  let t = text.trim()
+  if (t.startsWith('```')) {
+    t = t.replace(/^```[a-zA-Z0-9_-]*\s*/, '')
+    t = t.replace(/\s*```$/, '')
+  }
+  return t
+}
+
+// 兼容性解析辅助：将“类 JSON”文本修正为严格 JSON
+function normalizeJsonLike(text: string): string {
+  let t = text
+  // 移除 BOM
+  if (t.charCodeAt(0) === 0xfeff) t = t.slice(1)
+  // 替换中文全角括号/标点/引号为半角或标准
+  t = t
+    .replace(/【/g, '[')
+    .replace(/】/g, ']')
+    .replace(/，/g, ',')
+    .replace(/：/g, ':')
+    .replace(/（/g, '(')
+    .replace(/）/g, ')')
+    .replace(/[「」『』《》]/g, '"')
+  // 去除注释
+  t = t.replace(/\/\/.*$/gm, '').replace(/\/*[\s\S]*?\*\//g, '')
+  // 替换智能引号为标准引号
+  t = t.replace(/[“”]/g, '"').replace(/[‘’]/g, "'")
+  // 将单引号字符串转为双引号字符串
+  t = t.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"')
+  // 为未加引号的键名补充双引号（更宽松，支持中文/连字符等）
+  t = t.replace(/([,{]\s*)([^\s"'{}\[\],:]+)(\s*):/g, '$1"$2"$3:')
+  // 移除结尾多余逗号
+  t = t.replace(/,\s*([}\]])/g, '$1')
+  return t.trim()
+}
+
+// 将任意解析结果尽量规范为分镜数组
+function coerceToSegments(val: any): StoryboardRawSegment[] | null {
+  if (Array.isArray(val)) return val as StoryboardRawSegment[]
+  if (val && typeof val === 'object') {
+    // 常见容器字段
+    if (Array.isArray((val as any).segments)) return (val as any).segments
+    if (Array.isArray((val as any).shots)) return (val as any).shots
+    // 对象字典形式
+    const values = Object.values(val as Record<string, unknown>)
+    if (values.length > 0 && values.every(v => v && typeof v === 'object')) {
+      return values as StoryboardRawSegment[]
+    }
+    // 单个分镜对象
+    if ('prompt' in (val as any) || 'shot_number' in (val as any)) {
+      return [val as StoryboardRawSegment]
+    }
+  }
+  return null
+}
+
+// 更宽容的分镜解析：依次尝试 JSON、规范化 JSON、JSON5、逗号修复、YAML
+async function parseStoryboardFlexible(input: string): Promise<StoryboardRawSegment[] | null> {
+  const stripped = stripMarkdownCodeFences(input)
+
+  // 1) 直接 JSON
+  const j1 = safeParseJSON<unknown>(stripped)
+  let arr = coerceToSegments(j1)
+  if (arr) return arr
+
+  // 2) 规范化后 JSON
+  const normalized = normalizeJsonLike(stripped)
+  const j2 = safeParseJSON<unknown>(normalized)
+  arr = coerceToSegments(j2)
+  if (arr) return arr
+
+  // 3) JSON5（若可用）
+  try {
+    const mod: any = await import('json5')
+    const JSON5 = (mod && (mod.default ?? mod)) as { parse: (s: string) => unknown }
+    const j5a = JSON5.parse(stripped)
+    arr = coerceToSegments(j5a)
+    if (arr) return arr
+    const j5b = JSON5.parse(normalized)
+    arr = coerceToSegments(j5b)
+    if (arr) return arr
+  } catch {
+    // ignore if json5 not available
+  }
+
+  // 4) 逗号修复：将多对象换行相邻的情况包裹为数组并补逗号
+  const joined = `[${stripped.replace(/}\s*[\r\n]+\s*{/g, '},\n{')}]`
+  const j3 = safeParseJSON<unknown>(joined)
+  arr = coerceToSegments(j3)
+  if (arr) return arr
+  const joinedNorm = `[${normalized.replace(/}\s*[\r\n]+\s*{/g, '},\n{')}]`
+  const j4 = safeParseJSON<unknown>(joinedNorm)
+  arr = coerceToSegments(j4)
+  if (arr) return arr
+
+  // 5) YAML（若可用）
+  try {
+    const mod: any = await import('js-yaml')
+    const yaml = (mod && (mod.default ?? mod)) as { load: (s: string) => unknown }
+    const y1 = yaml.load(stripped)
+    arr = coerceToSegments(y1)
+    if (arr) return arr
+  } catch {
+    // ignore if js-yaml not available
+  }
+
+  return null
+}
+
 function extractActionValue(action?: string): string | undefined {
   if (!action || typeof action !== 'string') return undefined
 
@@ -511,6 +725,14 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [isDownloadingImages, setIsDownloadingImages] = useState(false)
   const [projectId, setProjectId] = useState<string | null>(null)
   const [scriptId, setScriptId] = useState<string | null>(null)
+  // 历史项目/脚本选择相关状态
+  const [existingProjects, setExistingProjects] = useState<Project[]>([])
+  const [existingScripts, setExistingScripts] = useState<Script[]>([])
+  const [selectedExistingProjectId, setSelectedExistingProjectId] = useState<string>('')
+  const [selectedExistingScriptId, setSelectedExistingScriptId] = useState<string>('')
+  const [isLoadingExisting, setIsLoadingExisting] = useState<boolean>(false)
+const [isRenamingProject, setIsRenamingProject] = useState<boolean>(false)
+const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
 
   // 图片放大预览（模态框）
   const [imagePreview, setImagePreview] = useState<{ url: string; alt: string } | null>(null)
@@ -524,6 +746,22 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   }, [imagePreview])
 
   const hasSegments = segments.length > 0
+
+  // 历史记录模块：当回填未完全成功时显示所有图片与视频，并支持复制提示词
+  const [historyImages, setHistoryImages] = useState<GeneratedImage[]>([])
+  const [historyVideos, setHistoryVideos] = useState<GeneratedVideo[]>([])
+  const [showHistoryModule, setShowHistoryModule] = useState<boolean>(false)
+  const [isHistoryCollapsed, setIsHistoryCollapsed] = useState<boolean>(true)
+  const [historyAspect, setHistoryAspect] = useState<'9:16' | '16:9'>('9:16')
+
+  const handleCopy = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setStatus({ type: 'success', text: '已复制提示词到剪贴板。' })
+    } catch (err) {
+      setStatus({ type: 'error', text: '复制失败，请手动复制。' })
+    }
+  }, [])
 
   const selectedReferenceImages = useMemo(
     () =>
@@ -569,6 +807,42 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
     }
     loadReferences()
   }, [])
+
+  // 加载历史项目列表
+  useEffect(() => {
+    const loadProjects = async () => {
+      try {
+        const projects = await getProjects()
+        setExistingProjects(projects)
+      } catch (error) {
+        console.error('Failed to load projects', error)
+        setStatus({ type: 'error', text: '加载项目列表失败。' })
+      }
+    }
+    loadProjects()
+  }, [])
+
+  // 当选择了项目后，加载对应脚本列表
+  useEffect(() => {
+    const loadScripts = async () => {
+      if (!selectedExistingProjectId) {
+        setExistingScripts([])
+        return
+      }
+      setIsLoadingExisting(true)
+      try {
+        const scripts = await getScripts(selectedExistingProjectId)
+        setExistingScripts(scripts)
+        setSelectedExistingScriptId(scripts.length > 0 ? scripts[0].id : '')
+      } catch (error) {
+        console.error('Failed to load scripts', error)
+        setStatus({ type: 'error', text: '加载脚本列表失败。' })
+      } finally {
+        setIsLoadingExisting(false)
+      }
+    }
+    loadScripts()
+  }, [selectedExistingProjectId])
 
   // moved handleBulkDownloadImages below downloadImage to avoid ReferenceError due to dependency on downloadImage
 
@@ -682,7 +956,10 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
     }
 
     try {
-      const parsed = JSON.parse(rawJson) as StoryboardRawSegment[]
+      const parsed = await parseStoryboardFlexible(rawJson)
+      if (!parsed) {
+        throw new Error('Invalid JSON: 请检查是否存在未加引号的键名、单引号、中文标点或注释。')
+      }
       if (!Array.isArray(parsed)) {
         throw new Error('Root must be an array.')
       }
@@ -815,6 +1092,153 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
     }
     reader.readAsText(file, 'utf-8')
   }, [])
+
+  // 载入选中的历史脚本，将其内容映射为分镜进行继续编辑
+  const handleLoadExistingScript = useCallback(async () => {
+    try {
+      if (!selectedExistingProjectId || !selectedExistingScriptId) {
+        setStatus({ type: 'info', text: '请先选择项目与脚本。' })
+        return
+      }
+      const project = existingProjects.find(p => p.id === selectedExistingProjectId) || null
+      const script = existingScripts.find(s => s.id === selectedExistingScriptId) || null
+      if (!script) {
+        setStatus({ type: 'error', text: '未找到所选脚本。' })
+        return
+      }
+
+      const mapped: StoryboardSegment[] = (script.content || []).map((seg, idx) => {
+        const pd = seg.prompt_detail
+        const promptObj = pd
+          ? {
+              subject: pd.subject
+                ? {
+                    characters_present: pd.subject.characters_present,
+                    expression: pd.subject.expression,
+                    action: pd.subject.action
+                  }
+                : undefined,
+              environment: pd.environment,
+              time_of_day: pd.time_of_day,
+              weather: pd.weather,
+              camera_angle: pd.camera_angle,
+              shot_size: pd.shot_size
+            }
+          : undefined
+        const promptText = seg.prompt?.trim().length ? seg.prompt : formatPromptChinese(promptObj)
+        return {
+          id: seg.id || `shot-${idx + 1}`,
+          shotNumber: idx + 1,
+          prompt: promptObj,
+          promptText: promptText || `Shot ${idx + 1}`
+        }
+      })
+
+      setSegments(mapped)
+      setSelectedForImages(mapped.map(s => s.id))
+      setSelectedForVideo([])
+      setImageResults({})
+      setVideoJobs({})
+      setVideoPromptOverrides({})
+      setParseError(null)
+      if (project) {
+        setProjectName(project.name)
+      }
+      setProjectId(selectedExistingProjectId)
+      setScriptId(selectedExistingScriptId)
+
+      // 回填历史生成图片和视频
+      try {
+        const [images, videos] = await Promise.all([
+          getGeneratedImages(selectedExistingScriptId),
+          getGeneratedVideos(selectedExistingScriptId)
+        ])
+
+        // 建立 shotNumber 到分镜的映射，优先使用数据库中的 shot_number
+        const byShot = new Map<number, StoryboardSegment>()
+        mapped.forEach(seg => {
+          if (typeof seg.shotNumber === 'number') {
+            byShot.set(seg.shotNumber, seg)
+          }
+        })
+
+        // 回填图片
+        const nextImageResults: Record<string, ImageResult> = {}
+        images.forEach(img => {
+          let target: StoryboardSegment | undefined
+          if (typeof img.shot_number === 'number') {
+            target = byShot.get(img.shot_number)
+          }
+          if (!target) {
+            // 退化为以 promptText 精确匹配
+            target = mapped.find(seg => (seg.promptText || '').trim() === (img.prompt || '').trim())
+          }
+          if (target) {
+            nextImageResults[target.id] = {
+              url: img.image_url,
+              prompt: img.prompt
+            }
+          }
+        })
+        setImageResults(nextImageResults)
+
+        // 回填视频
+        const nextVideoJobs: Record<string, VideoJobState> = {}
+        videos.forEach(v => {
+          let target: StoryboardSegment | undefined
+          if (typeof v.shot_number === 'number') {
+            target = byShot.get(v.shot_number)
+          }
+          if (!target) {
+            target = mapped.find(seg => (seg.promptText || '').trim() === (v.prompt || '').trim())
+          }
+          if (target) {
+            let status: VideoJobState['status'] = 'idle'
+            if (v.status === 'completed') status = 'success'
+            else if (v.status === 'failed') status = 'error'
+            else status = 'pending'
+
+            nextVideoJobs[target.id] = {
+              status,
+              jobId: undefined,
+              error: undefined,
+              videoUrl: v.video_url || undefined,
+              dbId: v.id
+            }
+          }
+        })
+        setVideoJobs(nextVideoJobs)
+
+        // 统计未映射的历史记录数量，并缓存全部历史用于展示
+        const unmatchedImages = images.filter(img => {
+          let target: StoryboardSegment | undefined
+          if (typeof img.shot_number === 'number') target = byShot.get(img.shot_number)
+          if (!target) target = mapped.find(seg => (seg.promptText || '').trim() === (img.prompt || '').trim())
+          return !target
+        })
+        const unmatchedVideos = videos.filter(v => {
+          let target: StoryboardSegment | undefined
+          if (typeof v.shot_number === 'number') target = byShot.get(v.shot_number)
+          if (!target) target = mapped.find(seg => (seg.promptText || '').trim() === (v.prompt || '').trim())
+          return !target
+        })
+        setHistoryImages(images)
+        setHistoryVideos(videos)
+        const shouldShowHistory = unmatchedImages.length > 0 || unmatchedVideos.length > 0 ||
+          (images.length > 0 && Object.keys(nextImageResults).length === 0) ||
+          (videos.length > 0 && Object.keys(nextVideoJobs).length === 0)
+        setShowHistoryModule(shouldShowHistory)
+        setIsHistoryCollapsed(!shouldShowHistory ? true : false)
+      } catch (err) {
+        console.warn('回填历史生成记录失败', err)
+      }
+
+      setStatus({ type: 'success', text: `已载入历史脚本，共 ${mapped.length} 个镜头。` })
+    } catch (error) {
+      console.error('Failed to load existing script', error)
+      setStatus({ type: 'error', text: '载入历史脚本失败。' })
+    }
+  }, [selectedExistingProjectId, selectedExistingScriptId, existingProjects, existingScripts])
 
   const toggleSelection = useCallback(
     (id: string, selected: string[], setter: (ids: string[]) => void) => {
@@ -1011,7 +1435,8 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
               await createGeneratedImage(
                 scriptId,
                 result.prompt ?? formatPromptForModel(segment),
-                result.url
+                result.url,
+                segment.shotNumber
               )
             } catch (e) {
               console.error('Failed to save generated image to Supabase', e)
@@ -1099,7 +1524,8 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
               createGeneratedImage(
                 scriptId,
                 result.prompt ?? prompts[index],
-                result.url
+                result.url,
+                targets[index]?.shotNumber
               )
             )
           )
@@ -1213,6 +1639,7 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
               image.url,
               promptForVideo,
               scriptId,
+              target.shotNumber,
               'pending',
               ''
             )
@@ -1350,11 +1777,135 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
               placeholder="Storyboard Project"
             />
           </label>
+          <button
+            type="button"
+            onClick={async () => {
+              const name = (projectName || '').trim()
+              if (!projectId) {
+                setStatus({ type: 'info', text: '请先创建或载入一个项目后再重命名。' })
+                return
+              }
+              if (!name) {
+                setStatus({ type: 'info', text: '项目名称不能为空。' })
+                return
+              }
+              setIsRenamingProject(true)
+              try {
+                const updated = await updateProjectName(projectId, name)
+                setExistingProjects(prev => prev.map(p => (p.id === projectId ? { ...p, name: updated.name } : p)))
+                setStatus({ type: 'success', text: '项目名称已更新。' })
+              } catch (e) {
+                console.error('Rename project failed', e)
+                setStatus({ type: 'error', text: '项目重命名失败。' })
+              } finally {
+                setIsRenamingProject(false)
+              }
+            }}
+            disabled={!projectId || isRenamingProject || !(projectName || '').trim()}
+            className="mt-6 h-10 rounded-md bg-gray-700 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:bg-gray-300 disabled:text-gray-600"
+          >
+            {isRenamingProject ? '重命名中…' : '重命名'}
+          </button>
           <p className="text-xs text-gray-500">
             The project name is used when downloading images and preparing Veo prompts.
           </p>
         </div>
       </header>
+
+      {/* 载入历史项目/脚本 */}
+      <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-gray-900">Load existing project/script</h2>
+          {isLoadingExisting && (
+            <span className="text-xs text-gray-500">加载中…</span>
+          )}
+        </div>
+        <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_auto]">
+          <label className="text-sm text-gray-600">
+            Project
+            <select
+              value={selectedExistingProjectId}
+              onChange={e => {
+                setSelectedExistingProjectId(e.target.value)
+                setSelectedExistingScriptId('')
+              }}
+              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">选择一个项目</option>
+              {existingProjects.map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm text-gray-600">
+            Script
+            <select
+              value={selectedExistingScriptId}
+              onChange={e => setSelectedExistingScriptId(e.target.value)}
+              disabled={!selectedExistingProjectId || existingScripts.length === 0}
+              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-400"
+            >
+              <option value="">{selectedExistingProjectId ? '选择一个脚本' : '请先选择项目'}</option>
+              {existingScripts.map(s => (
+                <option key={s.id} value={s.id}>
+                  {new Date(s.created_at).toLocaleString()} · {s.status}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="flex items-end gap-2">
+            <button
+              type="button"
+              onClick={handleLoadExistingScript}
+              disabled={!selectedExistingProjectId || !selectedExistingScriptId}
+              className="h-10 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-gray-300 disabled:text-gray-600"
+            >
+              加载并继续编辑
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                if (!selectedExistingProjectId) return
+                let ok = typeof window !== 'undefined' ? window.confirm('确认删除该项目及其所有脚本与生成内容？此操作不可恢复。') : false
+                if (!ok) return
+                let confirmName = ''
+                if (typeof window !== 'undefined') {
+                  confirmName = window.prompt(`为防止误删，请输入项目名称以确认：\n${(existingProjects.find(p => p.id === selectedExistingProjectId)?.name) || ''}`) || ''
+                }
+                const expected = (existingProjects.find(p => p.id === selectedExistingProjectId)?.name || '').trim()
+                if (!expected || confirmName.trim() !== expected) {
+                  setStatus({ type: 'info', text: '项目名称不匹配，已取消删除。' })
+                  return
+                }
+                setIsDeletingProject(true)
+                try {
+                  await deleteProject(selectedExistingProjectId)
+                  const projects = await getProjects()
+                  setExistingProjects(projects)
+                  setSelectedExistingProjectId('')
+                  setSelectedExistingScriptId('')
+                  setExistingScripts([])
+                  if (projectId === selectedExistingProjectId) {
+                    setProjectId(null)
+                    setScriptId(null)
+                  }
+                  setStatus({ type: 'success', text: '项目已删除。' })
+                } catch (e) {
+                  console.error('Delete project failed', e)
+                  setStatus({ type: 'error', text: '删除项目失败。' })
+                } finally {
+                  setIsDeletingProject(false)
+                }
+              }}
+              disabled={!selectedExistingProjectId || isDeletingProject}
+              className="h-10 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:bg-gray-300 disabled:text-gray-600"
+            >
+              {isDeletingProject ? '删除中…' : '删除项目'}
+            </button>
+          </div>
+        </div>
+        <p className="mt-2 text-xs text-gray-500">载入后可以继续进行参考图选择、批量替换、图片生成与 Veo3 视频提交。</p>
+      </section>
 
       {/* Floating right-side step tabs */}
       <nav className="fixed right-4 top-1/2 z-40 hidden -translate-y-1/2 flex-col space-y-2 md:flex">
@@ -1411,6 +1962,120 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
           placeholder="Paste storyboard JSON array or CSV text here"
         />
         {parseError && <p className="text-sm text-red-600">{parseError}</p>}
+
+      {/* 历史模块：在回填不完整时显示（可折叠） */}
+      {showHistoryModule && (
+        <div className="mt-4 rounded-md border border-yellow-200 bg-yellow-50 p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-yellow-800">历史记录未能完全映射到分镜，以下为从数据库读取的所有历史图片与视频（提示词可复制）</p>
+              <p className="text-xs text-yellow-700">{historyImages.length} 张图片 · {historyVideos.length} 个视频</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-yellow-800">图片比例</span>
+                <div className="inline-flex overflow-hidden rounded border border-yellow-300">
+                  <button
+                    type="button"
+                    className={`px-2 py-1 text-xs ${historyAspect === '9:16' ? 'bg-yellow-200 text-yellow-900' : 'text-yellow-800 hover:bg-yellow-100'}`}
+                    onClick={() => setHistoryAspect('9:16')}
+                  >
+                    9:16
+                  </button>
+                  <button
+                    type="button"
+                    className={`px-2 py-1 text-xs ${historyAspect === '16:9' ? 'bg-yellow-200 text-yellow-900' : 'text-yellow-800 hover:bg-yellow-100'}`}
+                    onClick={() => setHistoryAspect('16:9')}
+                  >
+                    16:9
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsHistoryCollapsed(!isHistoryCollapsed)}
+                className="rounded-md border border-yellow-300 px-3 py-1 text-xs text-yellow-800 hover:bg-yellow-100"
+              >
+                {isHistoryCollapsed ? '展开' : '折叠'}
+              </button>
+            </div>
+          </div>
+          {!isHistoryCollapsed && (
+            <div className="mt-3 space-y-4">
+              {historyImages.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700">历史图片</h4>
+                  <div className="mt-2 grid grid-cols-3 gap-2 md:grid-cols-6">
+                    {historyImages.map(img => (
+                      <div key={img.id} className="rounded border border-gray-200 p-1">
+                        <div
+                          className="relative w-full overflow-hidden rounded bg-gray-100"
+                          style={{ paddingTop: historyAspect === '9:16' ? '177.78%' : '56.25%' }}
+                        >
+                          <img
+                            src={img.image_url}
+                            alt={img.prompt || 'generated image'}
+                            className="absolute inset-0 h-full w-full cursor-zoom-in object-cover"
+                            onClick={() => setImagePreview({ url: img.image_url, alt: img.prompt || 'generated image' })}
+                            loading="lazy"
+                          />
+                        </div>
+                        <div className="mt-2 flex items-start justify-between gap-2">
+                          <p className="flex-1 truncate text-xs text-gray-600" title={img.prompt}>{img.prompt}</p>
+                          <button
+                            type="button"
+                            className="whitespace-nowrap rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-100"
+                            onClick={() => handleCopy(img.prompt || '')}
+                          >
+                            复制
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {historyVideos.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700">历史视频</h4>
+                  <div className="mt-2 grid grid-cols-3 gap-2 md:grid-cols-6">
+                    {historyVideos.map(v => (
+                      <div key={v.id} className="rounded border border-gray-200 p-1">
+                        <div
+                          className="relative w-full overflow-hidden rounded bg-gray-100"
+                          style={{ paddingTop: historyAspect === '9:16' ? '177.78%' : '56.25%' }}
+                        >
+                          {v.video_url ? (
+                            <video
+                              src={v.video_url}
+                              controls
+                              playsInline
+                              className="absolute inset-0 h-full w-full rounded object-cover"
+                            />
+                          ) : (
+                            <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-500">暂无视频链接（状态：{v.status}）</div>
+                          )}
+                        </div>
+                        <div className="mt-2 flex items-start justify-between gap-2">
+                          <p className="flex-1 truncate text-xs text-gray-600" title={v.prompt}>{v.prompt}</p>
+                          <button
+                            type="button"
+                            className="whitespace-nowrap rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-100"
+                            onClick={() => handleCopy(v.prompt || '')}
+                          >
+                            复制
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       </section>
 
       <div ref={step2SentinelRef} aria-hidden className="h-16" />

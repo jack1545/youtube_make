@@ -23,6 +23,7 @@ CREATE TABLE generated_images (
   prompt TEXT NOT NULL,
   image_url TEXT NOT NULL,
   status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'generating', 'completed', 'failed')),
+  shot_number INTEGER,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -30,6 +31,7 @@ CREATE TABLE generated_images (
 CREATE INDEX idx_projects_user_id ON projects(user_id);
 CREATE INDEX idx_scripts_project_id ON scripts(project_id);
 CREATE INDEX idx_generated_images_script_id ON generated_images(script_id);
+CREATE INDEX idx_generated_images_script_shot ON generated_images(script_id, shot_number);
 
 -- 创建参考图表
 CREATE TABLE reference_images (
@@ -58,9 +60,11 @@ CREATE TABLE generated_videos (
   prompt TEXT NOT NULL,
   video_url TEXT,
   status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+  shot_number INTEGER,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE INDEX idx_reference_images_user_id ON reference_images(user_id);
 CREATE INDEX idx_generated_videos_user_id ON generated_videos(user_id);
 CREATE INDEX idx_generated_videos_script_id ON generated_videos(script_id);
+CREATE INDEX idx_generated_videos_script_shot ON generated_videos(script_id, shot_number);

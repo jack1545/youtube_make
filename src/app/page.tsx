@@ -171,25 +171,16 @@ export default function Home() {
     title: string
     created_at: string
     content: ScriptSegment[]
-    type: 'generated' | 'persisted'
+    type: 'generated'
   }
 
-  const scriptsToDisplay: ScriptCard[] = [
-    ...generatedScripts.map((script, index) => ({
-      id: script.id,
-      title: script.title || `脚本草稿 ${index + 1}`,
-      created_at: '',
-      content: script.segments,
-      type: 'generated' as const
-    })),
-    ...scripts.map((script, index) => ({
-      id: script.id,
-      title: `脚本 ${index + 1}（${script.id.slice(0, 8)}）`,
-      created_at: script.created_at,
-      content: (script.content as ScriptSegment[]) ?? [],
-      type: 'persisted' as const
-    }))
-  ]
+  const scriptsToDisplay: ScriptCard[] = generatedScripts.map((script, index) => ({
+    id: script.id,
+    title: script.title || `脚本草稿 ${index + 1}`,
+    created_at: '',
+    content: script.segments,
+    type: 'generated' as const
+  }))
 
   const loadApiKeys = async () => {
     try {
@@ -631,7 +622,7 @@ export default function Home() {
       })
 
       for (const image of images) {
-        await createGeneratedImage(editingScriptId, image.prompt, image.url)
+        await createGeneratedImage(editingScriptId, image.prompt, image.url, undefined)
       }
 
       await loadScriptAssets(editingScriptId)
@@ -660,7 +651,7 @@ export default function Home() {
     setIsQueueingVideo(true)
     try {
       for (const image of imagesToQueue) {
-        await createGeneratedVideo(image.image_url, image.prompt, editingScriptId)
+        await createGeneratedVideo(image.image_url, image.prompt, editingScriptId, undefined)
       }
       setStatus({ type: 'success', message: `已提交 ${imagesToQueue.length} 个视频任务。` })
       setSelectedImageIdsForVideo([])
@@ -885,197 +876,6 @@ export default function Home() {
       <section className="space-y-6">
         <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
           <div className="space-y-6">
-            <div className="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-              <div className="flex items-start justify-between">
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">项目管理</h3>
-                  <p className="mt-1 text-sm text-gray-500">选择一个项目作为脚本与生成内容的归属。</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowProjectForm(prev => !prev)}
-                  className="text-sm text-blue-600 hover:text-blue-700"
-                >
-                  {showProjectForm ? '收起' : '新建项目'}
-                </button>
-              </div>
-
-              {showProjectForm && (
-                <form onSubmit={handleCreateProject} className="space-y-3 rounded-md border border-gray-200 p-4">
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-gray-600">项目名称</label>
-                    <input
-                      type="text"
-                      required
-                      value={newProjectName}
-                      onChange={event => setNewProjectName(event.target.value)}
-                      className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="例如：童话故事改编"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-gray-600">项目描述</label>
-                    <textarea
-                      value={newProjectDescription}
-                      onChange={event => setNewProjectDescription(event.target.value)}
-                      rows={2}
-                      className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="补充项目用途、风格等信息 (选填)"
-                    />
-                  </div>
-                  <div className="flex justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowProjectForm(false)
-                        setNewProjectName('')
-                        setNewProjectDescription('')
-                      }}
-                      className="rounded-md border border-gray-300 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50"
-                    >
-                      取消
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={isCreatingProject}
-                      className="rounded-md bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {isCreatingProject ? '创建中…' : '创建项目'}
-                    </button>
-                  </div>
-                </form>
-              )}
-
-              <div className="space-y-2">
-                {projects.map(project => (
-                  <button
-                    key={project.id}
-                    type="button"
-                    onClick={() => setSelectedProjectId(project.id)}
-                    className={`w全 rounded-md border px-3 py-3 text-left text-sm ${
-                      selectedProjectId === project.id
-                        ? 'border-blue-500 bg-blue-50 text-blue-700'
-                        : 'border-gray-200 hover:border-blue-300'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium">{project.name}</span>
-                      <span className="text-xs text-gray-400">{new Date(project.created_at).toLocaleDateString()}</span>
-                    </div>
-                    <p className="mt-1 line-clamp-2 text-xs text-gray-500">
-                      {project.description || '暂无描述'}
-                    </p>
-                  </button>
-                ))}
-                {projects.length === 0 && (
-                  <p className="text-sm text-gray-500">尚未创建项目，先添加一个项目即可开始。</p>
-                )}
-              </div>
-            </div>
-            <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold text-gray-900">脚本列表</h3>
-                {selectedProjectId && (
-                  <Link
-                    href={`/projects/${selectedProjectId}`}
-                    className="text-xs text-blue-600 hover:text-blue-700"
-                  >
-                    打开项目工作台 ↗
-                  </Link>
-                )}
-              </div>
-              <div className="space-y-2">
-                {scripts.map(script => (
-                  <button
-                    key={script.id}
-                    type="button"
-                    onClick={() => activateScript(script)}
-                    className={`w-full rounded-md border px-3 py-3 text-left text-sm ${
-                      editingScriptId === script.id
-                        ? 'border-blue-500 bg-blue-50 text-blue-700'
-                        : 'border-gray-200 hover:border-blue-300'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium">脚本 {script.id.slice(0, 8)}</span>
-                      <span className="text-xs text-gray-400">{new Date(script.created_at).toLocaleDateString()}</span>
-                    </div>
-                    <p className="mt-1 text-xs text-gray-500">片段：{(script.content as ScriptSegment[]).length}</p>
-                  </button>
-                ))}
-                {scripts.length === 0 && (
-                  <p className="text-sm text-gray-500">当前项目还没有脚本。</p>
-                )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveScript(null)
-                    setEditingScriptId(null)
-                    setScriptSegments([])
-                    setSelectedSegmentIds([])
-                    setScriptImages([])
-                    setGeneratedVideos([])
-                    setSelectedImageIdsForVideo([])
-                    if (generatedScripts.length) {
-                      setGeneratedScripts([])
-                      setExpandedScriptIds(prev => prev.filter(id => !generatedScripts.some(script => script.id === id)))
-                    }
-                  }}
-                  className="w-full rounded-md border border-dashed border-gray-300 px-3 py-2 text-xs text-gray-600 hover:border-blue-300 hover:text-blue-600"
-                >
-                  新建空白脚本草稿
-                </button>
-              </div>
-            </div>
-          </div>
-          <div className="space-y-6">
-            <div className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">创意脚本工作台</h3>
-                  <p className="mt-1 text-sm text-gray-500">
-                    输入故事梗概后由 Gemini 批量生成片段，可在此处编辑、替换与保存。
-                  </p>
-                </div>
-                {currentProject && (
-                  <span className="text-xs text-gray-500">当前项目：{currentProject.name}</span>
-                )}
-              </div>
-
-              <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_auto]">
-                <textarea
-                  value={storyOutline}
-                  onChange={event => setStoryOutline(event.target.value)}
-                  rows={4}
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="输入故事梗概、品牌 Brief 或角色设定，Gemini 将基于此生成分镜脚本。"
-                />
-                <div className="space-y-2">
-                  <label className="text-xs font-medium text-gray-600">脚本数量：{scriptCount}</label>
-                  <input
-                    type="range"
-                    min={3}
-                    max={12}
-                    value={scriptCount}
-                    onChange={event => setScriptCount(Number(event.target.value))}
-                    className="w-full"
-                  />
-                  <div className="flex justify-between text-[10px] text-gray-400">
-                    <span>3</span>
-                    <span>12</span>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleGenerateScript}
-                  disabled={isGeneratingScript}
-                  className="h-full rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isGeneratingScript ? '生成中…' : '批量生成脚本'}
-                </button>
-              </div>
-
-            </div>
 
             {scriptsToDisplay.map((scriptCard) => {
               const isGenerated = scriptCard.type === 'generated'
@@ -1131,16 +931,6 @@ export default function Home() {
                       >
                         下载 JSON
                       </button>
-                      {isActive && (
-                        <button
-                          type="button"
-                          onClick={handleSaveScript}
-                          disabled={isSavingScript}
-                          className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {isSavingScript ? '保存中…' : '保存脚本'}
-                        </button>
-                      )}
                       {!isActive && (
                         <button
                           type="button"
@@ -1303,141 +1093,8 @@ export default function Home() {
                 </div>
               )
             })}
-            <div className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-              <h3 className="text-lg font-semibold text-gray-900">Gemini 修改意见</h3>
-              <p className="mt-1 text-sm text-gray-500">
-                将当前脚本与修改要求交给 Gemini，生成新的草稿。保存前不会覆盖现有脚本。
-              </p>
-              <textarea
-                value={revisionNote}
-                onChange={event => setRevisionNote(event.target.value)}
-                rows={3}
-                className="mt-3 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="例如：让第 2 个片段更具悬念感，将角色 B 的情绪改为兴奋。"
-              />
-              <div className="mt-3 flex justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setRevisionNote('')}
-                  className="rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50"
-                >
-                  清空
-                </button>
-                <button
-                  type="button"
-                  onClick={handleRequestRevision}
-                  disabled={isRequestingRevision || !revisionNote.trim()}
-                  className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isRequestingRevision ? '提交中…' : '提交修改意见'}
-                </button>
-              </div>
-            </div>
-            <div className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">Doubao 批量生图</h3>
-                  <p className="mt-1 text-sm text-gray-500">
-                    勾选片段与参考图后，一键调用 Doubao 接口批量生成图片并自动入库。
-                  </p>
-                </div>
-                <div className="text-xs text-gray-500">
-                  <span className="mr-3">已选片段：{selectedSegmentIds.length || scriptSegments.length}</span>
-                  <span>参考图：{selectedReferenceImages.length || '未选择'}</span>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap items-center gap-3">
-                {selectedReferenceImages.map(image => (
-                  <span key={image.id} className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-700">
-                    <span className="block h-6 w-6 overflow-hidden rounded-full bg-white">
-                      <img src={image.url} alt={image.label ?? '参考图'} className="h-full w-full object-cover" />
-                    </span>
-                    {image.label ?? image.url.slice(0, 24)}
-                  </span>
-                ))}
-                {!selectedReferenceImages.length && (
-                  <span className="text-xs text-gray-500">未选择参考图，将使用纯提示词生成。</span>
-                )}
-              </div>
-              <div className="mt-4 flex justify-end">
-                <button
-                  type="button"
-                  onClick={handleGenerateImages}
-                  disabled={isGeneratingImages || !scriptSegments.length}
-                  className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isGeneratingImages ? `生成中 ${imageProgress}%` : '批量生成图片'}
-                </button>
-              </div>
-              <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {scriptImages.map(image => (
-                  <label key={image.id} className="space-y-2 rounded-lg border border-gray-200 p-3">
-                    <div className="aspect-video overflow-hidden rounded-md bg-gray-100">
-                      <img src={image.image_url} alt="生成图片" className="h-full w-full object-cover" />
-                    </div>
-                    <p className="line-clamp-2 text-xs text-gray-600">{image.prompt}</p>
-                    <div className="flex items-center justify-between text-xs text-gray-500">
-                      <span>{new Date(image.created_at).toLocaleString()}</span>
-                      <span>#{image.id.slice(0, 6)}</span>
-                    </div>
-                    <span className="flex items-center gap-2 text-xs text-gray-600">
-                      <input
-                        type="checkbox"
-                        className="rounded border-gray-300"
-                        checked={selectedImageIdsForVideo.includes(image.id)}
-                        onChange={() => handleToggleImageSelection(image.id)}
-                      />
-                      提交至 Veo3
-                    </span>
-                  </label>
-                ))}
-              </div>
-              {scriptImages.length === 0 && (
-                <p className="mt-4 text-sm text-gray-500">当前脚本尚未生成图片。</p>
-              )}
-              <div className="mt-4 flex justify-end">
-                <button
-                  type="button"
-                  onClick={handleQueueVideoGeneration}
-                  disabled={isQueueingVideo || !selectedImageIdsForVideo.length}
-                  className="rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isQueueingVideo ? '提交中…' : `提交 Veo3（${selectedImageIdsForVideo.length}）`}
-                </button>
-              </div>
-            </div>
-            <div className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-              <h3 className="text-lg font-semibold text-gray-900">Veo3 任务监控</h3>
-              <p className="mt-1 text-sm text-gray-500">
-                查看已提交的视频生成任务，支持对接本地后期流程。
-              </p>
-              <div className="mt-4 space-y-3">
-                {generatedVideos.map(video => (
-                  <div key={video.id} className="flex items-start justify-between rounded-lg border border-gray-200 p-3">
-                    <div className="pr-4">
-                      <p className="text-sm font-medium text-gray-900 line-clamp-2">{video.prompt}</p>
-                      <p className="mt-1 text-xs text-gray-500">{new Date(video.created_at).toLocaleString()}</p>
-                      {video.video_url && (
-                        <a
-                          href={video.video_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="mt-1 inline-flex text-xs text-blue-600 hover:text-blue-700"
-                        >
-                          查看视频链接 ↗
-                        </a>
-                      )}
-                    </div>
-                    <span className={`inline-flex items-center rounded-full border px-2 py-1 text-xs font-medium ${VIDEO_STATUS_STYLES[video.status]}`}>
-                      {VIDEO_STATUS_LABEL[video.status]}
-                    </span>
-                  </div>
-                ))}
-                {generatedVideos.length === 0 && (
-                  <p className="text-sm text-gray-500">暂未提交 Veo3 任务。</p>
-                )}
-              </div>
-            </div>
+
+
           </div>
         </div>
       </section>
