@@ -37,15 +37,15 @@
   # Supabase 配置
   NEXT_PUBLIC_SUPABASE_URL=https://你的-supabase-项目地址.supabase.co
   NEXT_PUBLIC_SUPABASE_ANON_KEY=你的-supabase-anon-key
-
-  # API Keys
-  GEMINI_API_KEY=你的-gemini-api-key
-  DOUBAO_API_KEY=你的-云雾AI-doubao-api-key
+  SUPABASE_SERVICE_ROLE_KEY=你的-supabase-service_role-key
   ```
 - 如何获取：
-  - Supabase：注册并创建项目，在项目设置里可以找到 `URL` 和 `anon key`。
+  - Supabase：注册并创建项目，进入项目找到 `Project Settings`。
+    - Project Settings > Data API 找到 `URL`
+    - Project Settings > API Keys 找到 `anon key` 和 `service_role`
   - Gemini API：在 Google AI Studio 申请或在 云雾AI（yunwu.ai）平台申请。
   - Doubao API：在 云雾AI（yunwu.ai）平台申请。
+  - Veo3 API：在 云雾AI（yunwu.ai）平台申请。
 
 4) 初始化数据库（Supabase）
 - 打开 Supabase 项目的 SQL 编辑器。
