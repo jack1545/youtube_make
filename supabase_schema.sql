@@ -16,6 +16,17 @@ CREATE TABLE scripts (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- 创建脚本分析表
+CREATE TABLE script_analyses (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  script_id UUID REFERENCES scripts(id) ON DELETE CASCADE,
+  analysis TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_script_analyses_script_id ON script_analyses(script_id);
+CREATE INDEX idx_script_analyses_created_at ON script_analyses(created_at);
+
 -- 创建生成图片表
 CREATE TABLE generated_images (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,

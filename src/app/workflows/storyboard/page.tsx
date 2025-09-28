@@ -6,6 +6,8 @@ import { createVeo3Job } from '@/lib/veo3'
 import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject } from '@/lib/db'
 import type { ReferenceImage, ScriptSegment as DbScriptSegment, Project, Script, GeneratedImage, GeneratedVideo } from '@/lib/types'
 import { supabase, isDemoMode } from '@/lib/supabase'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 // 查询 Veo3 任务详情，返回可能包含 video_url 的结构
 async function fetchVeo3Detail(taskId: string) {
@@ -659,6 +661,10 @@ export default function StoryboardWorkflowPage() {
   const [segments, setSegments] = useState<StoryboardSegment[]>([])
   const [parseError, setParseError] = useState<string | null>(null)
   const [status, setStatus] = useState<StatusMessage | null>(null)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [analysis, setAnalysis] = useState<string>('')
+  const [analysisId, setAnalysisId] = useState<string>('')
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null)
 
   const [selectedForImages, setSelectedForImages] = useState<string[]>([])
   const [selectedForVideo, setSelectedForVideo] = useState<string[]>([])
@@ -1092,6 +1098,39 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
     }
     reader.readAsText(file, 'utf-8')
   }, [])
+
+  const handleAnalyzeScript = useCallback(async () => {
+    setAnalyzeError(null)
+    const input = rawJson.trim()
+    if (!input) {
+      setStatus({ type: 'error', text: '请先在文本框粘贴脚本或JSON/CSV内容后再点击分析。' })
+      return
+    }
+    setIsAnalyzing(true)
+    try {
+      const res = await fetch('/api/analyze-script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scriptText: input, scriptId })
+      })
+      const data = await res.json()
+      if (data?.analysis) {
+        setAnalysis(data.analysis as string)
+        setAnalysisId((data.id as string) || '')
+        if (data?.demo) {
+          setStatus({ type: 'info', text: '已使用离线示例分析（未配置 Gemini API Key）。' })
+        } else {
+          setStatus({ type: 'success', text: '分析完成。' })
+        }
+      } else {
+        setAnalyzeError(data?.error || '分析失败，请稍后重试。')
+      }
+    } catch (e) {
+      setAnalyzeError('网络错误，分析失败。')
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }, [rawJson, scriptId])
 
   // 载入选中的历史脚本，将其内容映射为分镜进行继续编辑
   const handleLoadExistingScript = useCallback(async () => {
@@ -1953,6 +1992,14 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
             >
               Parse CSV
             </button>
+            <button
+              type="button"
+              onClick={handleAnalyzeScript}
+              disabled={isAnalyzing || !rawJson.trim()}
+              className="rounded-md bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-600"
+            >
+              {isAnalyzing ? '分析中…' : '分析脚本'}
+            </button>
           </div>
         </div>
         <textarea
@@ -1962,6 +2009,44 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
           placeholder="Paste storyboard JSON array or CSV text here"
         />
         {parseError && <p className="text-sm text-red-600">{parseError}</p>}
+        {analyzeError && <p className="text-sm text-red-600">{analyzeError}</p>}
+        {analysis && (
+          <div className="rounded-md border border-gray-200 bg-gray-50 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-gray-800">脚本分析结果（Gemini）</h3>
+              <div className="flex items-center gap-2">
+                {analysisId && (
+                  <a
+                    href={`/api/script-analysis/${analysisId}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded border border-blue-300 px-2 py-1 text-[11px] text-blue-700 hover:bg-white"
+                    title="查看已保存的分析 JSON"
+                  >
+                    已保存链接
+                  </a>
+                )}
+                <button
+                  type="button"
+                  className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                  onClick={() => handleCopy(analysis)}
+                >
+                  复制
+                </button>
+                <button
+                  type="button"
+                  className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                  onClick={() => { setAnalysis(''); setAnalysisId(''); }}
+                >
+                  清除
+                </button>
+              </div>
+            </div>
+            <div className="prose prose-sm max-w-none text-gray-800">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{analysis}</ReactMarkdown>
+            </div>
+          </div>
+        )}
 
       {/* 历史模块：在回填不完整时显示（可折叠） */}
       {showHistoryModule && (
@@ -2113,6 +2198,14 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                         <img
                           src={image.url}
                           alt={image.label ?? 'Reference'}
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          onError={e => {
+                            const img = e.currentTarget as HTMLImageElement
+                            img.src = '/file.svg'
+                            img.classList.remove('object-cover')
+                            img.classList.add('object-contain')
+                          }}
                           className="h-full w-full object-cover transition-transform duration-150 group-hover:scale-110"
                         />
                         {orderedIndex && (
@@ -2529,7 +2622,19 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                           className="flex items-center gap-2"
                         >
                           <span className="h-8 w-8 overflow-hidden rounded bg-gray-100">
-                            <img src={image.url} alt={image.label ?? 'Reference'} className="h-full w-full object-cover" />
+                            <img
+                              src={image.url}
+                              alt={image.label ?? 'Reference'}
+                              loading="lazy"
+                              referrerPolicy="no-referrer"
+                              onError={e => {
+                                const img = e.currentTarget as HTMLImageElement
+                                img.src = '/file.svg'
+                                img.classList.remove('object-cover')
+                                img.classList.add('object-contain')
+                              }}
+                              className="h-full w-full object-cover"
+                            />
                           </span>
                           <span className="max-w-[160px] truncate text-left">
                             {image.label ?? image.url}

@@ -78,3 +78,10 @@ export interface GeneratedVideo {
   shot_number?: number
   created_at: string
 }
+
+export interface ScriptAnalysis {
+  id: string
+  script_id: string
+  analysis: string
+  created_at: string
+}

@@ -467,7 +467,18 @@ export async function getReferenceImages(): Promise<ReferenceImage[]> {
   const user = getCurrentUser()
 
   if (isDemoMode) {
-    return demoReferenceImages.filter(img => img.user_id === user.id)
+    // 优先返回当前用户的 demo 参考图（按时间降序）
+    const mine = demoReferenceImages.filter(img => img.user_id === user.id)
+    const sortedMine = [...mine].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    )
+    if (sortedMine.length > 0) return sortedMine
+
+    // 若当前用户暂无 demo 参考图，则回退到全局 demo 示例，避免页面完全空白
+    const sortedAll = [...demoReferenceImages].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    )
+    return sortedAll
   }
 
   try {
@@ -479,7 +490,11 @@ export async function getReferenceImages(): Promise<ReferenceImage[]> {
 
     if (error?.code === 'PGRST205') {
       console.warn("Supabase table 'public.reference_images' missing; using local demo storage.")
-      return demoReferenceImages.filter(img => img.user_id === user.id)
+      const mine = demoReferenceImages.filter(img => img.user_id === user.id)
+      const sortedMine = [...mine].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      )
+      return sortedMine
     }
 
     if (error) {
@@ -488,7 +503,11 @@ export async function getReferenceImages(): Promise<ReferenceImage[]> {
       return []
     }
 
-    return data || []
+    const list = data || []
+    // 本地再次排序兜底，确保顺序稳定
+    return [...list].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    )
   } catch (e) {
     // Catch-all safeguard to prevent empty-object throws from bubbling to UI
     console.warn('Exception while fetching reference_images, returning empty list:', e)
