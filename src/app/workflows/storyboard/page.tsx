@@ -664,6 +664,7 @@ export default function StoryboardWorkflowPage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysis, setAnalysis] = useState<string>('')
   const [analysisId, setAnalysisId] = useState<string>('')
+  const [isAnalysisCollapsed, setIsAnalysisCollapsed] = useState(false)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
 
   const [selectedForImages, setSelectedForImages] = useState<string[]>([])
@@ -1185,6 +1186,27 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
       }
       setProjectId(selectedExistingProjectId)
       setScriptId(selectedExistingScriptId)
+
+      // 加载最新脚本分析（若存在）
+      try {
+        const { data, error } = await supabase
+          .from('script_analyses')
+          .select('id, analysis')
+          .eq('script_id', selectedExistingScriptId)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        if (!error && data) {
+          setAnalysis(data.analysis || '')
+          setAnalysisId((data.id as string) || '')
+        } else {
+          setAnalysis('')
+          setAnalysisId('')
+        }
+      } catch {
+        setAnalysis('')
+        setAnalysisId('')
+      }
 
       // 回填历史生成图片和视频
       try {
@@ -2010,43 +2032,59 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
         />
         {parseError && <p className="text-sm text-red-600">{parseError}</p>}
         {analyzeError && <p className="text-sm text-red-600">{analyzeError}</p>}
-        {analysis && (
-          <div className="rounded-md border border-gray-200 bg-gray-50 p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-gray-800">脚本分析结果（Gemini）</h3>
-              <div className="flex items-center gap-2">
-                {analysisId && (
-                  <a
-                    href={`/api/script-analysis/${analysisId}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="rounded border border-blue-300 px-2 py-1 text-[11px] text-blue-700 hover:bg-white"
-                    title="查看已保存的分析 JSON"
-                  >
-                    已保存链接
-                  </a>
-                )}
-                <button
-                  type="button"
-                  className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
-                  onClick={() => handleCopy(analysis)}
+        <div className="rounded-md border border-gray-200 bg-gray-50 p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-800">脚本分析结果（Gemini）</h3>
+            <div className="flex items-center gap-2">
+              {analysisId && (
+                <a
+                  href={`/api/script-analysis/${analysisId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="rounded border border-blue-300 px-2 py-1 text-[11px] text-blue-700 hover:bg-white"
+                  title="查看已保存的分析 JSON"
                 >
-                  复制
-                </button>
-                <button
-                  type="button"
-                  className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
-                  onClick={() => { setAnalysis(''); setAnalysisId(''); }}
-                >
-                  清除
-                </button>
-              </div>
-            </div>
-            <div className="prose prose-sm max-w-none text-gray-800">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{analysis}</ReactMarkdown>
+                  已保存链接
+                </a>
+              )}
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                onClick={() => setIsAnalysisCollapsed(v => !v)}
+                aria-expanded={!isAnalysisCollapsed}
+                title={isAnalysisCollapsed ? '展开分析内容' : '收起分析内容'}
+              >
+                {isAnalysisCollapsed ? '展开' : '收起'}
+              </button>
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                onClick={() => analysis && handleCopy(analysis)}
+                disabled={!analysis}
+                title={analysis ? '复制分析内容' : '暂无可复制内容'}
+              >
+                复制
+              </button>
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                onClick={() => { setAnalysis(''); setAnalysisId(''); }}
+              >
+                清除
+              </button>
             </div>
           </div>
-        )}
+
+          {analysis ? (
+            !isAnalysisCollapsed && (
+              <div className="prose prose-sm max-w-none text-gray-800">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{analysis}</ReactMarkdown>
+              </div>
+            )
+          ) : (
+            <p className="text-sm text-gray-500">暂未分析脚本</p>
+          )}
+        </div>
 
       {/* 历史模块：在回填不完整时显示（可折叠） */}
       {showHistoryModule && (
@@ -2107,13 +2145,29 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                         </div>
                         <div className="mt-2 flex items-start justify-between gap-2">
                           <p className="flex-1 truncate text-xs text-gray-600" title={img.prompt}>{img.prompt}</p>
-                          <button
-                            type="button"
-                            className="whitespace-nowrap rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-100"
-                            onClick={() => handleCopy(img.prompt || '')}
-                          >
-                            复制
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              className="whitespace-nowrap rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-100"
+                              onClick={() => handleCopy(img.prompt || '')}
+                            >
+                              复制
+                            </button>
+                            <button
+                              type="button"
+                              className="whitespace-nowrap rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-100"
+                              onClick={() => {
+                                const ext = extractFileExtension(img.image_url) || 'jpg'
+                                const base = slugify(img.prompt || 'image')
+                                const name = `${projectSlug || 'storyboard'}-history-${base}.${ext}`
+                                downloadImage(img.image_url, name)
+                              }}
+                              title="下载图片"
+                              aria-label="下载历史图片"
+                            >
+                              下载
+                            </button>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -2833,6 +2887,20 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                         title="放大预览"
                       >
                         🔍
+                      </button>
+                      <button
+                        type="button"
+                        className="absolute bottom-2 left-2 rounded-full bg-black/60 p-2 text-white shadow hover:bg-black/70"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          const ext = extractFileExtension(image.url) || 'jpg'
+                          const name = `${projectSlug || 'storyboard'}-shot-${segment.shotNumber}.${ext}`
+                          downloadImage(image.url, name)
+                        }}
+                        aria-label="下载图片"
+                        title="下载图片"
+                      >
+                        ⬇️
                       </button>
                     </>
                     ) : (
