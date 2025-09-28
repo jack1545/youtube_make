@@ -693,6 +693,12 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const step2SentinelRef = useRef<HTMLDivElement | null>(null)
   const step2SectionRef = useRef<HTMLElement | null>(null)
 
+  // 参考图分页状态
+  const [refCursor, setRefCursor] = useState<string | null>(null)
+  const [refHasMore, setRefHasMore] = useState<boolean>(true)
+  const [isLoadingRefs, setIsLoadingRefs] = useState<boolean>(false)
+  const [isLoadingMoreRefs, setIsLoadingMoreRefs] = useState<boolean>(false)
+
   useEffect(() => {
     const sentinel = step2SentinelRef.current
     if (!sentinel) return
@@ -780,6 +786,29 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
 
   const projectSlug = useMemo(() => slugify(projectName || 'storyboard'), [projectName])
 
+  // 加载更多参考图（基于 created_at 游标）
+  const loadMoreReferences = useCallback(async () => {
+    if (isLoadingMoreRefs || !refHasMore) return
+    setIsLoadingMoreRefs(true)
+    try {
+      const items = await getReferenceImages(10, refCursor ?? undefined)
+      const dedup = items.filter(item => !referenceImages.some(exist => exist.id === item.id))
+      const next = [...referenceImages, ...dedup]
+      setReferenceImages(next)
+      setSelectedReferenceIds(prev => prev.filter(id => next.some(item => item.id === id)))
+      const lastCreatedAt = items.length > 0 ? items[items.length - 1].created_at : refCursor
+      setRefCursor(lastCreatedAt ?? null)
+      if (items.length < 10) {
+        setRefHasMore(false)
+      }
+    } catch (error) {
+      console.error('Failed to load more reference images', error)
+      setStatus({ type: 'error', text: '加载更多参考图失败。' })
+    } finally {
+      setIsLoadingMoreRefs(false)
+    }
+  }, [isLoadingMoreRefs, refHasMore, refCursor, referenceImages])
+
   useEffect(() => {
     if (doubaoSizeMode !== 'custom') {
       return
@@ -803,13 +832,19 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
 
   useEffect(() => {
     const loadReferences = async () => {
+      setIsLoadingRefs(true)
       try {
-        const items = await getReferenceImages()
+        const items = await getReferenceImages(10)
         setReferenceImages(items)
         setSelectedReferenceIds(prev => prev.filter(id => items.some(item => item.id === id)))
+        const lastCreatedAt = items.length > 0 ? items[items.length - 1].created_at : null
+        setRefCursor(lastCreatedAt)
+        setRefHasMore(items.length === 10)
       } catch (error) {
         console.error('Failed to load reference images', error)
         setStatus({ type: 'error', text: 'Failed to load reference images.' })
+      } finally {
+        setIsLoadingRefs(false)
       }
     }
     loadReferences()
@@ -2282,6 +2317,19 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                 {selectedReferenceImages.map((img, i) => `${i + 1}`).join(' → ')}
               </p>
             )}
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={loadMoreReferences}
+                disabled={!refHasMore || isLoadingMoreRefs}
+                className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isLoadingMoreRefs ? '加载中…' : '加载更多'}
+              </button>
+              {!refHasMore && referenceImages.length > 0 && (
+                <span className="ml-2 text-xs text-gray-500">没有更多参考图</span>
+              )}
+            </div>
           </div>
         )}
         {hasSegments && !isStep2Stuck && (

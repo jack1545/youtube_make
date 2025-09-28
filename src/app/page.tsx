@@ -78,6 +78,10 @@ export default function Home() {
   const [newReferenceLabel, setNewReferenceLabel] = useState('')
   const [isAddingReference, setIsAddingReference] = useState(false)
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([])
+  // 分页状态：是否还有更多、分页游标（最后一条的 created_at）、加载更多状态
+  const [refHasMore, setRefHasMore] = useState(true)
+  const [refCursor, setRefCursor] = useState<string | null>(null)
+  const [isLoadingMoreRefs, setIsLoadingMoreRefs] = useState(false)
 
   const [projects, setProjects] = useState<Project[]>([])
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
@@ -197,14 +201,40 @@ export default function Home() {
     }
   }
 
-  const loadReferenceLibrary = async () => {
+  const loadReferenceLibrary = async (reset = false) => {
     try {
-      const items = await getReferenceImages()
+      const limit = 10
+      const items = await getReferenceImages(limit)
       setReferenceImages(items)
+      setRefCursor(items.length ? items[items.length - 1].created_at : null)
+      setRefHasMore(items.length === limit)
+      // 仅在重置/初次加载时同步校正选中项
       setSelectedReferenceIds(prev => prev.filter(id => items.some(item => item.id === id)))
     } catch (error) {
       console.error('Failed to load reference images', error)
       setStatus({ type: 'error', message: '加载参考图失败。' })
+    }
+  }
+
+  // 加载更多参考图（使用 created_at 游标）
+  const loadMoreReferences = async () => {
+    try {
+      const limit = 10
+      const before = refCursor ?? (referenceImages.length ? referenceImages[referenceImages.length - 1].created_at : undefined)
+      if (!before) {
+        setRefHasMore(false)
+        return
+      }
+      setIsLoadingMoreRefs(true)
+      const items = await getReferenceImages(limit, before)
+      setReferenceImages(prev => [...prev, ...items])
+      setRefCursor(items.length ? items[items.length - 1].created_at : refCursor)
+      setRefHasMore(items.length === limit)
+    } catch (error) {
+      console.error('Failed to load more reference images', error)
+      setStatus({ type: 'error', message: '加载更多参考图失败。' })
+    } finally {
+      setIsLoadingMoreRefs(false)
     }
   }
 
@@ -866,6 +896,19 @@ export default function Home() {
             </div>
           ))}
         </div>
+
+        {referenceImages.length > 0 && refHasMore && (
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={() => void loadMoreReferences()}
+              disabled={isLoadingMoreRefs}
+              className="rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isLoadingMoreRefs ? '加载中…' : '加载更多'}
+            </button>
+          </div>
+        )}
 
         {referenceImages.length === 0 && (
           <p className="mt-4 text-sm text-gray-500">

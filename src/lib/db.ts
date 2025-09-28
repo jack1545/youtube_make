@@ -43,8 +43,8 @@ let demoReferenceImages: ReferenceImage[] = [
   {
     id: 'demo_ref_1',
     user_id: 'admin_001',
-    url: 'https://images.unsplash.com/photo-1500530855697-b586d89ba3ee',
-    label: '森林晨光',
+    url: '/reference-sample.svg',
+    label: '参考图示例',
     created_at: new Date(Date.now() - 3600000).toISOString()
   }
 ]
@@ -424,29 +424,6 @@ export async function addReferenceImage(url: string, label?: string): Promise<Re
   const user = getCurrentUser()
 
   if (isDemoMode) {
-    const image: ReferenceImage = {
-      id: `demo_ref_${Date.now()}`,
-      user_id: user.id,
-      url,
-      label,
-      created_at: new Date().toISOString()
-    }
-    demoReferenceImages.unshift(image)
-    return image
-  }
-
-  const { data, error } = await supabase
-    .from('reference_images')
-    .insert({
-      user_id: user.id,
-      url,
-      label,
-      created_at: new Date().toISOString()
-    })
-    .select()
-    .single()
-
-  if (error?.code === 'PGRST205') {
     console.warn("Supabase table 'public.reference_images' missing; using local demo storage.")
     const image: ReferenceImage = {
       id: `demo_ref_${Date.now()}`,
@@ -459,58 +436,52 @@ export async function addReferenceImage(url: string, label?: string): Promise<Re
     return image
   }
 
-  if (error) throw error
-  return data as ReferenceImage
+  // 改为服务端 API 写入，使用 service role key
+  try {
+    const res = await fetch('/api/reference-images', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, label, user_id: user.id })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to add reference image (HTTP ${res.status})`)
+    }
+    const data = await res.json()
+    return data.item as ReferenceImage
+  } catch (error) {
+    console.error('Failed to add reference image via API', error)
+    throw error
+  }
 }
 
-export async function getReferenceImages(): Promise<ReferenceImage[]> {
+export async function getReferenceImages(limit = 10, before?: string): Promise<ReferenceImage[]> {
   const user = getCurrentUser()
 
   if (isDemoMode) {
-    // 优先返回当前用户的 demo 参考图（按时间降序）
     const mine = demoReferenceImages.filter(img => img.user_id === user.id)
     const sortedMine = [...mine].sort(
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     )
-    if (sortedMine.length > 0) return sortedMine
-
-    // 若当前用户暂无 demo 参考图，则回退到全局 demo 示例，避免页面完全空白
-    const sortedAll = [...demoReferenceImages].sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    )
-    return sortedAll
+    if (before) {
+      return sortedMine.filter(img => new Date(img.created_at).getTime() < new Date(before).getTime()).slice(0, limit)
+    }
+    return sortedMine.slice(0, limit)
   }
 
   try {
-    const { data, error } = await supabase
-      .from('reference_images')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
-
-    if (error?.code === 'PGRST205') {
-      console.warn("Supabase table 'public.reference_images' missing; using local demo storage.")
-      const mine = demoReferenceImages.filter(img => img.user_id === user.id)
-      const sortedMine = [...mine].sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      )
-      return sortedMine
-    }
-
-    if (error) {
-      // Be tolerant to unexpected error shapes (e.g., empty object {}) and avoid throwing to not break UI
-      console.warn('Supabase error while fetching reference_images, returning empty list instead of throwing:', error)
+    const params = new URLSearchParams({ user_id: user.id, limit: String(limit) })
+    if (before) params.set('before', before)
+    const res = await fetch(`/api/reference-images?${params.toString()}`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.error('API:get reference_images failed', err)
       return []
     }
-
-    const list = data || []
-    // 本地再次排序兜底，确保顺序稳定
-    return [...list].sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    )
-  } catch (e) {
-    // Catch-all safeguard to prevent empty-object throws from bubbling to UI
-    console.warn('Exception while fetching reference_images, returning empty list:', e)
+    const data = await res.json()
+    return (data.items as ReferenceImage[]) || []
+  } catch (error) {
+    console.error('Failed to load reference images via API', error)
     return []
   }
 }
@@ -525,21 +496,28 @@ export async function removeReferenceImage(id: string): Promise<void> {
     return
   }
 
-  const { error } = await supabase
-    .from('reference_images')
-    .delete()
-    .eq('id', id)
-    .eq('user_id', user.id)
-
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.reference_images' missing; using local demo storage.")
-    demoReferenceImages = demoReferenceImages.filter(
-      img => !(img.id === id && img.user_id === user.id)
-    )
-    return
+  // 服务端 API 删除（可后续扩展）：当前可直接从 Supabase 删除，也可实现 /api/reference-images/[id] DELETE
+  try {
+    // 暂时按直接 Supabase 删除的旧逻辑保留，若 RLS 阻断可再改为服务端 DELETE 路由
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (!supabaseUrl || !serviceRoleKey) {
+      console.warn('Supabase 未配置，无法删除参考图')
+      return
+    }
+    const { createClient } = await import('@supabase/supabase-js')
+    const svc = createClient(supabaseUrl, serviceRoleKey)
+    const { error } = await svc
+      .from('reference_images')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', user.id)
+    if (error) {
+      console.error('Service role delete reference_images error', error)
+    }
+  } catch (error) {
+    console.error('Failed to delete reference image via service role', error)
   }
-
-  if (error) throw error
 }
 
 // API Key 设置

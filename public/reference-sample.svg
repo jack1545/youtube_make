@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="参考图示例">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fde047"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="512" height="512" fill="url(#bg)"/>
+
+  <!-- stylized mountains -->
+  <path d="M 60 360 L 180 200 L 260 320 L 300 280 L 420 380 L 60 380 Z" fill="#0ea5e9" opacity="0.35"/>
+  <path d="M 40 380 L 160 220 L 240 340 L 320 260 L 460 400 L 40 400 Z" fill="#22d3ee" opacity="0.45"/>
+
+  <!-- sun -->
+  <circle cx="380" cy="150" r="46" fill="url(#sun)" opacity="0.9"/>
+
+  <!-- frame -->
+  <rect x="40" y="40" width="432" height="432" rx="18" ry="18" fill="none" stroke="#ffffff" stroke-width="10" opacity="0.65"/>
+
+  <!-- camera glyph -->
+  <g transform="translate(156,204)">
+    <rect x="0" y="0" width="200" height="140" rx="16" ry="16" fill="#ffffff" opacity="0.18"/>
+    <rect x="18" y="18" width="164" height="104" rx="10" ry="10" fill="none" stroke="#ffffff" stroke-width="6" opacity="0.8"/>
+    <circle cx="100" cy="70" r="30" fill="none" stroke="#ffffff" stroke-width="8" opacity="0.9"/>
+    <rect x="60" y="-26" width="80" height="26" rx="10" ry="10" fill="#ffffff" opacity="0.8"/>
+  </g>
+
+  <!-- label text -->
+  <text x="256" y="468" text-anchor="middle" font-family="system-ui, -apple-system, Segoe UI, Roboto, Noto Sans, Arial" font-size="28" fill="#ffffff" opacity="0.9">
+    参考图示例
+  </text>
+</svg>
