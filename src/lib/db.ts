@@ -420,6 +420,41 @@ export async function getGeneratedImages(scriptId: string): Promise<GeneratedIma
   return data || []
 }
 // 参考图相关操作
+// Local cache helpers for reference images (client-side, TTL-based)
+const REF_CACHE_TTL_MS = 5 * 60 * 1000 // 5 minutes
+const isBrowser = () => typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+const makeRefKey = (userId: string, before?: string, limit?: number) => `refimgs:${userId}:${before || 'latest'}:${limit ?? 10}`
+function readRefCache(key: string): ReferenceImage[] | null {
+  try {
+    if (!isBrowser()) return null
+    const raw = window.localStorage.getItem(key)
+    if (!raw) return null
+    const obj = JSON.parse(raw)
+    if (!obj || !Array.isArray(obj.items) || typeof obj.ts !== 'number') return null
+    if (Date.now() - obj.ts > REF_CACHE_TTL_MS) return null
+    return obj.items as ReferenceImage[]
+  } catch {
+    return null
+  }
+}
+function writeRefCache(key: string, items: ReferenceImage[]) {
+  try {
+    if (!isBrowser()) return
+    window.localStorage.setItem(key, JSON.stringify({ items, ts: Date.now() }))
+  } catch {}
+}
+function invalidateRefCaches(userId: string) {
+  try {
+    if (!isBrowser()) return
+    const prefix = `refimgs:${userId}:`
+    const keys: string[] = []
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i)
+      if (k && k.startsWith(prefix)) keys.push(k)
+    }
+    keys.forEach(k => window.localStorage.removeItem(k))
+  } catch {}
+}
 export async function addReferenceImage(url: string, label?: string): Promise<ReferenceImage> {
   const user = getCurrentUser()
 
@@ -433,12 +468,14 @@ export async function addReferenceImage(url: string, label?: string): Promise<Re
       created_at: new Date().toISOString()
     }
     demoReferenceImages.unshift(image)
+    invalidateRefCaches(user.id)
     return image
   }
 
   // 改为服务端 API 写入，使用 service role key
   try {
-    const res = await fetch('/api/reference-images', {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-images`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url, label, user_id: user.id })
@@ -448,6 +485,7 @@ export async function addReferenceImage(url: string, label?: string): Promise<Re
       throw new Error(err?.error || `Failed to add reference image (HTTP ${res.status})`)
     }
     const data = await res.json()
+    invalidateRefCaches(user.id)
     return data.item as ReferenceImage
   } catch (error) {
     console.error('Failed to add reference image via API', error)
@@ -470,16 +508,23 @@ export async function getReferenceImages(limit = 10, before?: string): Promise<R
   }
 
   try {
+    const key = makeRefKey(user.id, before, limit)
+    const cached = readRefCache(key)
+    if (cached) return cached
+
     const params = new URLSearchParams({ user_id: user.id, limit: String(limit) })
     if (before) params.set('before', before)
-    const res = await fetch(`/api/reference-images?${params.toString()}`)
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-images?${params.toString()}`)
     if (!res.ok) {
       const err = await res.json().catch(() => null)
       console.error('API:get reference_images failed', err)
       return []
     }
     const data = await res.json()
-    return (data.items as ReferenceImage[]) || []
+    const items = (data.items as ReferenceImage[]) || []
+    writeRefCache(key, items)
+    return items
   } catch (error) {
     console.error('Failed to load reference images via API', error)
     return []
@@ -493,6 +538,7 @@ export async function removeReferenceImage(id: string): Promise<void> {
     demoReferenceImages = demoReferenceImages.filter(
       img => !(img.id === id && img.user_id === user.id)
     )
+    invalidateRefCaches(user.id)
     return
   }
 
@@ -515,6 +561,7 @@ export async function removeReferenceImage(id: string): Promise<void> {
     if (error) {
       console.error('Service role delete reference_images error', error)
     }
+    invalidateRefCaches(user.id)
   } catch (error) {
     console.error('Failed to delete reference image via service role', error)
   }
@@ -793,4 +840,37 @@ export async function updateProjectName(projectId: string, name: string): Promis
 
   if (error) throw error
   return data as Project
+}
+
+export async function updateReferenceImageLabel(id: string, label: string): Promise<ReferenceImage> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    const idx = demoReferenceImages.findIndex(img => img.id === id && img.user_id === user.id)
+    if (idx >= 0) {
+      demoReferenceImages[idx] = { ...demoReferenceImages[idx], label }
+      invalidateRefCaches(user.id)
+      return demoReferenceImages[idx]
+    }
+    throw new Error('Reference image not found in demo mode')
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-images`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, label, user_id: user.id })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to update reference image label (HTTP ${res.status})`)
+    }
+    const data = await res.json()
+    invalidateRefCaches(user.id)
+    return data.item as ReferenceImage
+  } catch (error) {
+    console.error('Failed to update reference image via API', error)
+    throw error
+  }
 }

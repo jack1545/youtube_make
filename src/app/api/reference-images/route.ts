@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { getDb } from '@/lib/mongodb'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -7,12 +7,6 @@ export const dynamic = 'force-dynamic'
 // GET /api/reference-images?user_id=...&limit=10&before=ISO8601
 export async function GET(req: Request) {
   try {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-    if (!supabaseUrl || !serviceRoleKey) {
-      return NextResponse.json({ error: 'Supabase 未配置' }, { status: 400 })
-    }
-
     const url = new URL(req.url)
     const userId = url.searchParams.get('user_id')
     const limitStr = url.searchParams.get('limit')
@@ -23,32 +17,28 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: '缺少 user_id 参数' }, { status: 400 })
     }
 
-    const supabase = createClient(supabaseUrl, serviceRoleKey)
-    let query = supabase
-      .from('reference_images')
-      .select('id,user_id,url,label,created_at')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(limit)
-
+    // 仅使用 MongoDB
+    const db = await getDb()
+    const coll = db.collection('reference_images')
+    const filter: any = { user_id: userId }
     if (before) {
-      query = query.lt('created_at', before)
+      filter.created_at = { $lt: before }
     }
+    const docs = await coll
+      .find(filter)
+      .sort({ created_at: -1 })
+      .limit(limit)
+      .toArray()
 
-    const { data, error } = await query
+    const items = (docs || []).map((d: any) => ({
+      id: d.id || (d._id ? String(d._id) : undefined),
+      user_id: d.user_id,
+      url: d.url,
+      label: d.label ?? null,
+      created_at: typeof d.created_at === 'string' ? d.created_at : new Date(d.created_at).toISOString()
+    }))
 
-    if (error) {
-      const code = (error as any)?.code
-      const message = (error as any)?.message
-      console.error('API:get reference_images error', { code, message })
-      // 若为 Postgres statement_timeout（57014），避免前端报错，返回空列表
-      if (code === '57014' || /statement timeout/i.test(message || '')) {
-        return NextResponse.json({ items: [], warning: 'statement_timeout' }, { status: 200 })
-      }
-      return NextResponse.json({ error: '查询参考图失败' }, { status: 500 })
-    }
-
-    return NextResponse.json({ items: data || [] })
+    return NextResponse.json({ items })
   } catch (err: any) {
     console.error('API:get reference_images exception', err)
     return NextResponse.json({ error: err?.message || '服务端错误' }, { status: 500 })
@@ -59,12 +49,6 @@ export async function GET(req: Request) {
 // body: { url: string, label?: string, user_id: string }
 export async function POST(req: Request) {
   try {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-    if (!supabaseUrl || !serviceRoleKey) {
-      return NextResponse.json({ error: 'Supabase 未配置' }, { status: 400 })
-    }
-
     const payload = await req.json().catch(() => null)
     if (!payload || typeof payload !== 'object') {
       return NextResponse.json({ error: '无效请求体' }, { status: 400 })
@@ -75,21 +59,66 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: '缺少必要字段 url 或 user_id' }, { status: 400 })
     }
 
-    const supabase = createClient(supabaseUrl, serviceRoleKey)
-    const { data, error } = await supabase
-      .from('reference_images')
-      .insert([{ url, label: label ?? null, user_id }])
-      .select()
-      .single()
-
-    if (error) {
-      console.error('API:insert reference_images error', { code: (error as any)?.code, message: (error as any)?.message })
-      return NextResponse.json({ error: '新增参考图失败' }, { status: 500 })
+    // 仅写入 MongoDB，支持公开图片 URL 或本地 data:image Data URL
+    const isHttp = /^https?:\/\//i.test(url)
+    const isDataImage = /^data:image\//i.test(url)
+    if (!isHttp && !isDataImage) {
+      return NextResponse.json({ error: '仅支持 http/https 或 data:image 图片链接' }, { status: 400 })
     }
 
-    return NextResponse.json({ item: data })
+    const db = await getDb()
+    const coll = db.collection('reference_images')
+    const nowIso = new Date().toISOString()
+    const doc: any = { user_id, url, label: label ?? null, created_at: nowIso }
+
+    // 若已有唯一 id 字段，使用；否则让 Mongo 生成 _id
+    const result = await coll.insertOne(doc)
+    const id = result.insertedId ? String(result.insertedId) : doc.id
+    const item = { id, user_id, url, label: label ?? null, created_at: nowIso }
+    return NextResponse.json({ item })
   } catch (err: any) {
     console.error('API:insert reference_images exception', err)
+    return NextResponse.json({ error: err?.message || '服务端错误' }, { status: 500 })
+  }
+}
+
+// PATCH /api/reference-images
+// body: { id: string, label: string, user_id: string }
+export async function PATCH(req: Request) {
+  try {
+    const payload = await req.json().catch(() => null)
+    if (!payload || typeof payload !== 'object') {
+      return NextResponse.json({ error: '无效请求体' }, { status: 400 })
+    }
+
+    const { id, label, user_id } = payload as { id?: string; label?: string; user_id?: string }
+    if (!id || typeof id !== 'string' || !user_id || typeof user_id !== 'string') {
+      return NextResponse.json({ error: '缺少必要字段 id 或 user_id' }, { status: 400 })
+    }
+
+    const db = await getDb()
+    const coll = db.collection('reference_images')
+
+    // 支持通过 _id 或 id 查询
+    const filter = [{ _id: new (await import('mongodb')).ObjectId(id), user_id }, { id, user_id }]
+    const doc = await coll.findOne({ $or: filter as any })
+    if (!doc) {
+      return NextResponse.json({ error: '参考图不存在或不属于该用户' }, { status: 404 })
+    }
+
+    await coll.updateOne({ _id: doc._id }, { $set: { label: label ?? null } })
+    const updated = await coll.findOne({ _id: doc._id })
+    const item = {
+      id: updated?.id || String(updated?._id),
+      user_id: updated?.user_id,
+      url: updated?.url,
+      label: updated?.label ?? null,
+      created_at: typeof updated?.created_at === 'string' ? updated?.created_at : new Date(updated?.created_at).toISOString()
+    }
+
+    return NextResponse.json({ item })
+  } catch (err: any) {
+    console.error('API:update reference_images exception', err)
     return NextResponse.json({ error: err?.message || '服务端错误' }, { status: 500 })
   }
 }

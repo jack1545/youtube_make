@@ -3,7 +3,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { generateBatchImages } from '@/lib/doubao'
 import { createVeo3Job } from '@/lib/veo3'
-import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject } from '@/lib/db'
+import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject, updateReferenceImageLabel } from '@/lib/db'
 import type { ReferenceImage, ScriptSegment as DbScriptSegment, Project, Script, GeneratedImage, GeneratedVideo } from '@/lib/types'
 import { supabase, isDemoMode } from '@/lib/supabase'
 import ReactMarkdown from 'react-markdown'
@@ -686,6 +686,8 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
 
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([])
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([])
+  // 新增：解析后的参考图 URL 映射（data: → blob:）
+  const [resolvedRefUrlMap, setResolvedRefUrlMap] = useState<Record<string, string>>({})
   const [newReferenceUrl, setNewReferenceUrl] = useState('')
   const [newReferenceLabel, setNewReferenceLabel] = useState('')
   const [isAddingReference, setIsAddingReference] = useState(false)
@@ -698,6 +700,43 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [refHasMore, setRefHasMore] = useState<boolean>(true)
   const [isLoadingRefs, setIsLoadingRefs] = useState<boolean>(false)
   const [isLoadingMoreRefs, setIsLoadingMoreRefs] = useState<boolean>(false)
+
+  // 当 referenceImages 变化时，将其中的 data:URL 转换为 blob: URL，以稳定渲染
+  useEffect(() => {
+    let isCancelled = false
+    const revokeList: string[] = []
+
+    async function resolveAll() {
+      const entries = await Promise.all(
+        referenceImages.map(async (img) => {
+          const url = img.url || ''
+          try {
+            if (typeof url === 'string' && url.startsWith('data:')) {
+              const resp = await fetch(url)
+              const blob = await resp.blob()
+              const objectUrl = URL.createObjectURL(blob)
+              revokeList.push(objectUrl)
+              return [img.id, objectUrl] as const
+            }
+            return [img.id, url] as const
+          } catch {
+            return [img.id, url] as const
+          }
+        })
+      )
+      if (!isCancelled) {
+        const nextMap: Record<string, string> = {}
+        for (const [id, u] of entries) nextMap[id] = u
+        setResolvedRefUrlMap(nextMap)
+      }
+    }
+
+    resolveAll()
+    return () => {
+      isCancelled = true
+      revokeList.forEach(u => URL.revokeObjectURL(u))
+    }
+  }, [referenceImages])
 
   useEffect(() => {
     const sentinel = step2SentinelRef.current
@@ -2285,15 +2324,15 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                     >
                       <span className="relative h-8 w-8 overflow-hidden rounded bg-gray-100">
                         <img
-                          src={image.url}
+                          src={resolvedRefUrlMap[image.id] ?? image.url}
                           alt={image.label ?? 'Reference'}
                           loading="lazy"
                           referrerPolicy="no-referrer"
                           onError={e => {
-                            const img = e.currentTarget as HTMLImageElement
-                            img.src = '/file.svg'
-                            img.classList.remove('object-cover')
-                            img.classList.add('object-contain')
+                            const imgEl = e.currentTarget as HTMLImageElement
+                            imgEl.src = '/file.svg'
+                            imgEl.classList.remove('object-cover')
+                            imgEl.classList.add('object-contain')
                           }}
                           className="h-full w-full object-cover transition-transform duration-150 group-hover:scale-110"
                         />
@@ -2666,6 +2705,45 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                   required
                   value={newReferenceUrl}
                   onChange={event => setNewReferenceUrl(event.target.value)}
+                  onPaste={async (event) => {
+                    try {
+                      const dt = event.clipboardData
+                      if (!dt) return
+                      // 优先处理剪贴板中的图片文件
+                      const items = Array.from(dt.items || [])
+                      for (const it of items) {
+                        if (it.kind === 'file' && it.type?.startsWith('image/')) {
+                          const file = it.getAsFile()
+                          if (file) {
+                            event.preventDefault()
+                            const dataUrl = await fileToDataUrl(file)
+                            const image = await addReferenceImage(dataUrl, newReferenceLabel.trim() || undefined)
+                            setReferenceImages(prev => [image, ...prev])
+                            setSelectedReferenceIds(prev => [image.id, ...prev])
+                            setNewReferenceUrl('')
+                            setNewReferenceLabel('')
+                            setStatus({ type: 'success', text: '已从剪贴板图片添加参考图。' })
+                            return
+                          }
+                        }
+                      }
+                      // 退化为文本 URL（http/https 或 data:image）
+                      const text = dt.getData('text')?.trim()
+                      if (text && (/^https?:\/\/\S+/.test(text) || /^data:image\//i.test(text))) {
+                        event.preventDefault()
+                        const image = await addReferenceImage(text, newReferenceLabel.trim() || undefined)
+                        setReferenceImages(prev => [image, ...prev])
+                        setSelectedReferenceIds(prev => [image.id, ...prev])
+                        setNewReferenceUrl('')
+                        setNewReferenceLabel('')
+                        setStatus({ type: 'success', text: '已从剪贴板文本添加参考图。' })
+                        return
+                      }
+                    } catch (err: any) {
+                      console.error('处理剪贴板失败', err)
+                      setStatus({ type: 'error', text: err?.message || '处理剪贴板失败' })
+                    }
+                  }}
                   className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Paste reference image URL"
                 />
@@ -2741,6 +2819,24 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                           <span className="max-w-[160px] truncate text-left">
                             {image.label ?? image.url}
                           </span>
+                          <input
+                            type="text"
+                            defaultValue={image.label ?? ''}
+                            placeholder="Rename label"
+                            onBlur={async (e) => {
+                              const newLabel = e.currentTarget.value.trim()
+                              if ((image.label ?? '') === newLabel) return
+                              try {
+                                const updated = await updateReferenceImageLabel(image.id, newLabel)
+                                setReferenceImages(prev => prev.map(it => it.id === image.id ? updated : it))
+                                setStatus({ type: 'success', text: '参考图标签已更新' })
+                              } catch (err: any) {
+                                console.error('更新参考图标签失败', err)
+                                setStatus({ type: 'error', text: err?.message || '更新参考图标签失败' })
+                              }
+                            }}
+                            className="w-[160px] rounded border border-gray-200 px-2 py-1 text-[11px] text-gray-700 focus:border-blue-400 focus:outline-none"
+                          />
                         </button>
                         <button
                           type="button"
