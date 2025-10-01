@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { BatchImageRequest, generateImage } from '@/lib/doubao'
 import { createClient } from '@supabase/supabase-js'
+import { getDb } from '@/lib/mongodb'
 
 interface DoubaoBatchPayload {
   requests: BatchImageRequest[]
@@ -8,6 +9,8 @@ interface DoubaoBatchPayload {
     size?: string
     responseFormat?: 'url' | 'b64_json'
   }
+  // 新增：当提供脚本ID时，服务端将生成结果持久化到 MongoDB
+  script_id?: string
 }
 
 async function resolveDoubaoApiKey(): Promise<string | null> {
@@ -71,6 +74,15 @@ export async function POST(req: Request) {
     const defaultSize = payload.options?.size
     const defaultFormat = payload.options?.responseFormat
 
+    // 若传入 script_id，则准备持久化集合
+    const scriptId = payload.script_id || (payload as any).scriptId || null
+    const nowIso = new Date().toISOString()
+    let imagesColl: any = null
+    if (scriptId) {
+      const db = await getDb()
+      imagesColl = db.collection('generated_images')
+    }
+
     const results = []
     for (let index = 0; index < payload.requests.length; index += 1) {
       const request = payload.requests[index]
@@ -91,6 +103,29 @@ export async function POST(req: Request) {
         responseFormat: defaultFormat
       })
       results.push(image)
+
+      // 持久化到 MongoDB（可选）
+      if (imagesColl && scriptId) {
+        try {
+          // 某些环境对 generated_images 建立了 unique 索引 id_1，
+          // 若未显式设置 id 将以 null 写入并在第二条开始触发 E11000。
+          // 这里为每条插入生成唯一 id，避免索引冲突。
+          const uniqueId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+            ? crypto.randomUUID()
+            : `${scriptId}-${Date.now()}-${index}`
+          await imagesColl.insertOne({
+            id: uniqueId,
+            script_id: scriptId,
+            prompt: image.prompt || request.prompt,
+            image_url: image.url,
+            shot_number: request.shot_number,
+            status: 'completed',
+            created_at: nowIso
+          })
+        } catch (persistErr) {
+          console.error('Failed to persist generated image', persistErr)
+        }
+      }
     }
 
     return NextResponse.json({ results })

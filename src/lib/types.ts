@@ -1,5 +1,7 @@
 export interface Project {
   id: string
+  // 旧项目 UUID（来自 Supabase），用于逐步迁移期间的兼容与查询优化
+  legacy_id?: string
   name: string
   description: string
   created_at: string
@@ -12,6 +14,8 @@ export interface Script {
   content: ScriptSegment[]
   status: 'draft' | 'editing' | 'completed'
   created_at: string
+  // 原始脚本文本（JSON/CSV 粘贴内容），用于加载与更新
+  raw_text?: string
 }
 
 // Structured prompt detail for each segment
@@ -56,6 +60,15 @@ export interface ReferenceImage {
   user_id: string
   url: string
   label?: string
+  created_at: string
+}
+
+export interface ReferenceVideo {
+  id: string
+  user_id: string
+  url: string
+  label?: string
+  script_id?: string | null
   created_at: string
 }
 

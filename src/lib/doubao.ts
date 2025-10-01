@@ -1,4 +1,4 @@
-﻿const buildPlaceholderUrl = (label: string) => `https://via.placeholder.com/1024x1024?text=${encodeURIComponent(label)}`
+const buildPlaceholderUrl = (label: string) => `https://via.placeholder.com/1024x1024?text=${encodeURIComponent(label)}`
 
 export interface ImageGenerationParams {
   prompt: string
@@ -20,12 +20,16 @@ export interface BatchImageRequest {
   referenceImageUrl?: string
   referenceImageUrls?: string[]
   size?: string
+  // 新增：镜头编号用于持久化到数据库
+  shot_number?: number
 }
 
 export interface BatchGenerationOptions {
   onProgress?: (completed: number, total: number) => void
   size?: string
   responseFormat?: 'url' | 'b64_json'
+  // 新增：关联脚本ID，服务端据此持久化到 generated_images
+  scriptId?: string
 }
 
 export async function generateImage(params: ImageGenerationParams): Promise<GeneratedImage> {
@@ -57,7 +61,7 @@ export async function generateImage(params: ImageGenerationParams): Promise<Gene
       // 根据用户提供的请求格式，使用 image 数组，并保留 image_urls 以兼容不同网关
       ;(payload as any).image = referenceUrls
       ;(payload as any).image_urls = referenceUrls
-      ;(payload as any).sequential_image_generation = 'auto'
+      ;(payload as any).sequential_image_generation = 'disabled'
       ;(payload as any).sequential_image_generation_options = { max_images: 1 }
     }
 
@@ -115,7 +119,9 @@ export async function generateBatchImages(
         options: {
           size: options.size,
           responseFormat: options.responseFormat
-        }
+        },
+        // 传递脚本ID用于服务端持久化
+        script_id: options.scriptId
       })
     })
 

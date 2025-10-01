@@ -3,8 +3,8 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { generateBatchImages } from '@/lib/doubao'
 import { createVeo3Job } from '@/lib/veo3'
-import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject, updateReferenceImageLabel } from '@/lib/db'
-import type { ReferenceImage, ScriptSegment as DbScriptSegment, Project, Script, GeneratedImage, GeneratedVideo } from '@/lib/types'
+import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject, updateReferenceImageLabel, updateScript, updateGeneratedImage, addReferenceVideo, getReferenceVideos, removeReferenceVideo } from '@/lib/db'
+import type { ReferenceImage, ScriptSegment as DbScriptSegment, Project, Script, GeneratedImage, GeneratedVideo, ReferenceVideo } from '@/lib/types'
 import { supabase, isDemoMode } from '@/lib/supabase'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -97,6 +97,27 @@ const CUSTOM_DEFAULT_DIMENSIONS: Record<AspectOption, { width: number; height: n
   '16:9': { width: 2048, height: 1152 },
   '1:1': { width: 2048, height: 2048 },
   '3:4': { width: 1536, height: 2048 }
+}
+
+// 提取 YouTube 视频ID（支持 watch?v=、youtu.be、embed 等常见格式）
+function extractYouTubeId(url: string): string | null {
+  try {
+    const u = new URL(url)
+    if (/youtube\.com$/i.test(u.hostname) || /www\.youtube\.com$/i.test(u.hostname)) {
+      const v = u.searchParams.get('v')
+      if (v) return v
+      const paths = u.pathname.split('/').filter(Boolean)
+      const idx = paths.indexOf('embed')
+      if (idx >= 0 && paths[idx + 1]) return paths[idx + 1]
+    }
+    if (/youtu\.be$/i.test(u.hostname) || /www\.youtu\.be$/i.test(u.hostname)) {
+      const id = u.pathname.split('/').filter(Boolean)[0]
+      return id || null
+    }
+    return null
+  } catch {
+    return null
+  }
 }
 
 function parseAspect(value: string) {
@@ -666,6 +687,43 @@ export default function StoryboardWorkflowPage() {
   const [analysisId, setAnalysisId] = useState<string>('')
   const [isAnalysisCollapsed, setIsAnalysisCollapsed] = useState(false)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
+  // Gemini 新功能（分镜提示词CSV & 世界观改写）
+  const [isPrompting, setIsPrompting] = useState(false)
+  const [promptCsv, setPromptCsv] = useState('')
+  const [promptError, setPromptError] = useState<string | null>(null)
+  const [isRewriting, setIsRewriting] = useState(false)
+  const [worldview, setWorldview] = useState('赛博朋克')
+  const [worldviewResult, setWorldviewResult] = useState('')
+  const [worldviewError, setWorldviewError] = useState<string | null>(null)
+  // 世界观结构化字段：核心设定 / 关键元素 / 参考案例
+  const [worldviewCore, setWorldviewCore] = useState('')
+  const [worldviewElements, setWorldviewElements] = useState('')
+  const [worldviewReferences, setWorldviewReferences] = useState('')
+  const [isSavingWorldview, setIsSavingWorldview] = useState(false)
+  const [worldviewSavedInfo, setWorldviewSavedInfo] = useState('')
+  // 世界观预设管理
+  const [worldviews, setWorldviews] = useState<string[]>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('storyboard_worldviews')
+        if (saved) {
+          const arr = JSON.parse(saved)
+          if (Array.isArray(arr) && arr.every(x => typeof x === 'string')) {
+            return arr as string[]
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    return ['赛博朋克', '克苏鲁', '蒸汽朋克', '生物朋克']
+  })
+  const [newWorldview, setNewWorldview] = useState('')
+  const [editingKey, setEditingKey] = useState<string | null>(null)
+  const [editingText, setEditingText] = useState('')
+  useEffect(() => {
+    try {
+      localStorage.setItem('storyboard_worldviews', JSON.stringify(worldviews))
+    } catch { /* ignore */ }
+  }, [worldviews])
 
   const [selectedForImages, setSelectedForImages] = useState<string[]>([])
   const [selectedForVideo, setSelectedForVideo] = useState<string[]>([])
@@ -676,6 +734,10 @@ export default function StoryboardWorkflowPage() {
   const [isGeneratingImages, setIsGeneratingImages] = useState(false)
   const [imageProgress, setImageProgress] = useState(0)
   const [generatingShotIds, setGeneratingShotIds] = useState<Record<string, boolean>>({})
+  // 右侧参考图悬浮面板折叠状态
+  const [isRefPanelOpen, setIsRefPanelOpen] = useState(false)
+  // 右侧“批量替换预览文本”悬浮面板折叠状态（默认折叠）
+  const [isBulkPanelOpen, setIsBulkPanelOpen] = useState(false)
 
 const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [doubaoResolution, setDoubaoResolution] = useState<DoubaoResolution>('4K')
@@ -800,11 +862,58 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
   const hasSegments = segments.length > 0
 
   // 历史记录模块：当回填未完全成功时显示所有图片与视频，并支持复制提示词
-  const [historyImages, setHistoryImages] = useState<GeneratedImage[]>([])
+const [historyImages, setHistoryImages] = useState<GeneratedImage[]>([])
+const [selectedHistoryIds, setSelectedHistoryIds] = useState<string[]>([])
+const [editingHistoryShot, setEditingHistoryShot] = useState<Record<string, string>>({})
+const [updatingHistoryShot, setUpdatingHistoryShot] = useState<Record<string, boolean>>({})
+
+const toggleHistorySelection = useCallback((id: string) => {
+  setSelectedHistoryIds(prev => (prev.includes(id) ? prev.filter(item => item !== id) : [id, ...prev]))
+}, [])
+
+const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
+  try {
+    const val = (editingHistoryShot[img.id] ?? (typeof img.shot_number === 'number' ? String(img.shot_number) : '')).trim()
+    if (!val) {
+      setStatus({ type: 'error', text: '请输入镜头号。' })
+      return
+    }
+    const shotNumber = Number(val)
+    if (!Number.isFinite(shotNumber) || shotNumber <= 0) {
+      setStatus({ type: 'error', text: '镜头号需为正整数。' })
+      return
+    }
+    setUpdatingHistoryShot(prev => ({ ...prev, [img.id]: true }))
+    const updated = await updateGeneratedImage(img.id, { shotNumber })
+    setHistoryImages(prev => prev.map(it => (it.id === img.id ? { ...it, shot_number: updated.shot_number } : it)))
+    setStatus({ type: 'success', text: '镜头号已更新。' })
+  } catch (error) {
+    console.error('Failed to update shot number for history image', error)
+    setStatus({ type: 'error', text: '更新镜头号失败。' })
+  } finally {
+    setUpdatingHistoryShot(prev => ({ ...prev, [img.id]: false }))
+  }
+}, [editingHistoryShot])
   const [historyVideos, setHistoryVideos] = useState<GeneratedVideo[]>([])
   const [showHistoryModule, setShowHistoryModule] = useState<boolean>(false)
   const [isHistoryCollapsed, setIsHistoryCollapsed] = useState<boolean>(true)
   const [historyAspect, setHistoryAspect] = useState<'9:16' | '16:9'>('9:16')
+  // 参考图点击放大遮罩
+  const [refZoomUrl, setRefZoomUrl] = useState<string | null>(null)
+
+  // 参考视频（YouTube）模块状态
+  const [newYoutubeUrl, setNewYoutubeUrl] = useState('')
+  const [newYoutubeLabel, setNewYoutubeLabel] = useState('')
+  const [isAddingYoutube, setIsAddingYoutube] = useState(false)
+  const [referenceVideos, setReferenceVideos] = useState<ReferenceVideo[]>([])
+  const [isLoadingRefVideos, setIsLoadingRefVideos] = useState(false)
+  // 历史图片：支持上传与粘贴补充
+  const [newHistoryUrl, setNewHistoryUrl] = useState('')
+  const [newHistoryPrompt, setNewHistoryPrompt] = useState('')
+  const [newHistoryShotNumber, setNewHistoryShotNumber] = useState<string>('')
+  const [newHistoryFile, setNewHistoryFile] = useState<File | null>(null)
+  const [isAddingHistory, setIsAddingHistory] = useState(false)
+  const [isUploadingHistory, setIsUploadingHistory] = useState(false)
 
   const handleCopy = useCallback(async (text: string) => {
     try {
@@ -895,6 +1004,10 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
       try {
         const projects = await getProjects()
         setExistingProjects(projects)
+        // 若尚未选择项目且存在项目，默认选择第一个项目，后续将自动加载脚本与历史记录
+        if (!selectedExistingProjectId && projects.length > 0) {
+          setSelectedExistingProjectId(projects[0].id)
+        }
       } catch (error) {
         console.error('Failed to load projects', error)
         setStatus({ type: 'error', text: '加载项目列表失败。' })
@@ -1081,23 +1194,7 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
       setParseError(null)
       setStatus({ type: 'success', text: `Parsed ${normalised.length} storyboard shots.` })
 
-      // Create Supabase project and script for persistence
-      try {
-        const project = await createProject(projectName || 'Storyboard Project', 'Storyboard parsed in workbench')
-        setProjectId(project.id)
-        const scriptSegments: DbScriptSegment[] = normalised.map(s => ({
-          id: s.id,
-          scene: s.prompt?.subject?.action || s.prompt?.environment || '',
-          prompt: s.promptText,
-          characters: [],
-          setting: s.prompt?.environment || '',
-          mood: s.prompt?.time_of_day || ''
-        }))
-        const script = await createScript(project.id, scriptSegments)
-        setScriptId(script.id)
-      } catch (e) {
-        console.error('Failed to create project/script for Supabase', e)
-      }
+      // 在 Step 1 中不再自动创建项目和脚本，改为点击“新建项目”按钮后再保存脚本。
     } catch (error) {
       console.error('Failed to parse storyboard JSON', error)
       setParseError('Failed to parse JSON. Please check the format.')
@@ -1133,23 +1230,7 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
       setParseError(null)
       setStatus({ type: 'success', text: `Parsed ${normalised.length} storyboard shots from CSV.` })
 
-      // Supabase 持久化（与 JSON 逻辑一致）
-      try {
-        const project = await createProject(projectName || 'Storyboard Project', 'Storyboard parsed from CSV in workbench')
-        setProjectId(project.id)
-        const scriptSegments: DbScriptSegment[] = normalised.map(s => ({
-          id: s.id,
-          scene: s.prompt?.subject?.action || s.prompt?.environment || '',
-          prompt: s.promptText,
-          characters: [],
-          setting: s.prompt?.environment || '',
-          mood: s.prompt?.time_of_day || ''
-        }))
-        const script = await createScript(project.id, scriptSegments)
-        setScriptId(script.id)
-      } catch (e) {
-        console.error('Failed to create project/script for Supabase (CSV)', e)
-      }
+      // 在 Step 1 中不再自动创建项目和脚本，改为点击“新建项目”按钮后再保存脚本。
     } catch (error) {
       console.error('Failed to parse storyboard CSV', error)
       setParseError('CSV 解析失败。请检查格式或尝试 JSON 解析。')
@@ -1260,19 +1341,23 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
       }
       setProjectId(selectedExistingProjectId)
       setScriptId(selectedExistingScriptId)
+      setRawJson(script.raw_text || '')
 
       // 加载最新脚本分析（若存在）
       try {
-        const { data, error } = await supabase
-          .from('script_analyses')
-          .select('id, analysis')
-          .eq('script_id', selectedExistingScriptId)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle()
-        if (!error && data) {
-          setAnalysis(data.analysis || '')
-          setAnalysisId((data.id as string) || '')
+        const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+        const params = new URLSearchParams({ script_id: selectedExistingScriptId, latest: '1' })
+        const res = await fetch(`${baseOrigin}/api/script-analyses?${params.toString()}`)
+        if (res.ok) {
+          const data = await res.json()
+          const item = data.item
+          if (item) {
+            setAnalysis(item.analysis || '')
+            setAnalysisId(item.id || '')
+          } else {
+            setAnalysis('')
+            setAnalysisId('')
+          }
         } else {
           setAnalysis('')
           setAnalysisId('')
@@ -1359,21 +1444,60 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
         })
         setHistoryImages(images)
         setHistoryVideos(videos)
-        const shouldShowHistory = unmatchedImages.length > 0 || unmatchedVideos.length > 0 ||
+        // 显示历史模块：只要存在历史图片或视频即显示；如果存在未映射项则默认展开，否则默认折叠
+        const hasUnmatched = unmatchedImages.length > 0 || unmatchedVideos.length > 0 ||
           (images.length > 0 && Object.keys(nextImageResults).length === 0) ||
           (videos.length > 0 && Object.keys(nextVideoJobs).length === 0)
+        const shouldShowHistory = images.length > 0 || videos.length > 0
         setShowHistoryModule(shouldShowHistory)
-        setIsHistoryCollapsed(!shouldShowHistory ? true : false)
+        setIsHistoryCollapsed(!hasUnmatched)
       } catch (err) {
         console.warn('回填历史生成记录失败', err)
       }
 
-      setStatus({ type: 'success', text: `已载入历史脚本，共 ${mapped.length} 个镜头。` })
+      // 加载脚本成功后，拉取已保存的参考视频（按脚本ID）
+      try {
+        if (script?.id) {
+          setIsLoadingRefVideos(true)
+          const videos = await getReferenceVideos(10, undefined, script.id)
+          setReferenceVideos(videos)
+        }
+      } catch (e) {
+        console.warn('加载参考视频失败', e)
+      } finally {
+        setIsLoadingRefVideos(false)
+      }
     } catch (error) {
       console.error('Failed to load existing script', error)
       setStatus({ type: 'error', text: '载入历史脚本失败。' })
     }
   }, [selectedExistingProjectId, selectedExistingScriptId, existingProjects, existingScripts])
+
+  // 当选择了项目与脚本后，自动载入历史脚本与生成记录，避免遗漏点击导致历史模块不显示
+  useEffect(() => {
+    if (selectedExistingProjectId && selectedExistingScriptId) {
+      handleLoadExistingScript()
+    }
+  }, [selectedExistingProjectId, selectedExistingScriptId, handleLoadExistingScript])
+
+  // 当脚本ID变更（创建或选择）时，拉取参考视频列表
+  useEffect(() => {
+    let cancelled = false
+    async function loadRefVideosByScript() {
+      if (!scriptId) return
+      try {
+        setIsLoadingRefVideos(true)
+        const videos = await getReferenceVideos(10, undefined, scriptId)
+        if (!cancelled) setReferenceVideos(videos)
+      } catch (e) {
+        console.warn('基于脚本ID加载参考视频失败', e)
+      } finally {
+        if (!cancelled) setIsLoadingRefVideos(false)
+      }
+    }
+    loadRefVideosByScript()
+    return () => { cancelled = true }
+  }, [scriptId])
 
   const toggleSelection = useCallback(
     (id: string, selected: string[], setter: (ids: string[]) => void) => {
@@ -1399,40 +1523,12 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
       return
     }
 
-    const applyRules = (value?: string) => {
+  const applyRules = (value?: string) => {
       if (typeof value !== 'string' || value.length === 0) return value
       return rules.reduce((acc, rule) => acc.split(rule.find).join(rule.replace), value)
     }
-
-    setSegments(prev =>
-      prev.map(segment => {
-        const next: StoryboardSegment = {
-          ...segment,
-          promptText: applyRules(segment.promptText) ?? ''
-        }
-
-        if (segment.prompt) {
-          const prompt: StoryboardPrompt = { ...segment.prompt }
-          prompt.environment = applyRules(prompt.environment)
-          prompt.time_of_day = applyRules(prompt.time_of_day)
-          prompt.weather = applyRules(prompt.weather)
-          prompt.camera_angle = applyRules(prompt.camera_angle)
-          prompt.shot_size = applyRules(prompt.shot_size)
-          if (prompt.subject) {
-            const subject: StoryboardSubject = { ...prompt.subject }
-            subject.characters_present = applyRules(subject.characters_present)
-            subject.expression = applyRules(subject.expression)
-            subject.action = applyRules(subject.action)
-            prompt.subject = subject
-          }
-          next.prompt = prompt
-        }
-
-        return next
-      })
-    )
-
-    setStatus({ type: 'success', text: `已对所有预览镜头应用批量替换，共执行 ${rules.length} 条规则。` })
+    setRawJson(prev => applyRules(prev) ?? prev)
+    setStatus({ type: 'success', text: `已对原始脚本文本执行批量替换，共执行 ${rules.length} 条规则。` })
   }, [bulkFind, bulkReplaceValue, bulkRules])
 
   const handleAddReferenceImage = useCallback(async (event: FormEvent<HTMLFormElement>) => {
@@ -1545,10 +1641,11 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
             {
               prompt: formatPromptForModel(segment),
               size: doubaoSizeValue,
-              referenceImageUrls: referenceUrls.length ? referenceUrls : undefined
+              referenceImageUrls: referenceUrls.length ? referenceUrls : undefined,
+              shot_number: segment.shotNumber
             }
           ],
-          { size: doubaoSizeValue }
+          { size: doubaoSizeValue, scriptId }
         )
 
         if (result) {
@@ -1564,17 +1661,17 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
           const marker = doubaoSizeLabel ? ` at ${doubaoSizeLabel}` : ''
           setStatus({ type: 'success', text: `Generated image for shot ${segment.shotNumber}${marker}.` })
 
-          // Persist image to Supabase if scriptId is available
-          if (scriptId) {
+          // 若未提供 scriptId，则前端调用 API 写库；提供了 scriptId 时已由服务端持久化，避免重复写入
+          if (!scriptId) {
             try {
               await createGeneratedImage(
-                scriptId,
+                scriptId || '',
                 result.prompt ?? formatPromptForModel(segment),
                 result.url,
                 segment.shotNumber
               )
             } catch (e) {
-              console.error('Failed to save generated image to Supabase', e)
+              console.error('Failed to save generated image via API', e)
             }
           }
         }
@@ -1629,12 +1726,16 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
         }
       })
 
-      const results = await generateBatchImages(requests, {
-        size: doubaoSizeValue,
-        onProgress: (completed, total) => {
-          setImageProgress(Math.round((completed / total) * 100))
+      const results = await generateBatchImages(
+        requests.map((req, idx) => ({ ...req, shot_number: targets[idx]?.shotNumber })),
+        {
+          size: doubaoSizeValue,
+          onProgress: (completed, total) => {
+            setImageProgress(Math.round((completed / total) * 100))
+          },
+          scriptId
         }
-      })
+      )
 
       const merged: Record<string, ImageResult> = { ...imageResults }
       results.forEach((result, index) => {
@@ -1651,13 +1752,13 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
 
       setImageResults(merged)
 
-      // Persist batch images to Supabase if scriptId is available
-      if (scriptId) {
+      // 若未提供 scriptId，则前端调用 API 写库；提供了 scriptId 时已由服务端持久化，避免重复写入
+      if (!scriptId) {
         try {
           await Promise.all(
             results.map((result, index) =>
               createGeneratedImage(
-                scriptId,
+                scriptId || '',
                 result.prompt ?? prompts[index],
                 result.url,
                 targets[index]?.shotNumber
@@ -1665,7 +1766,7 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
             )
           )
         } catch (e) {
-          console.error('Failed to save batch images to Supabase', e)
+          console.error('Failed to save batch images via API', e)
         }
       }
 
@@ -1894,6 +1995,18 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
   )
 
   const hasVideoSelection = selectedForVideo.some(id => imageResults[id])
+  // ESC 关闭参考图放大遮罩
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setRefZoomUrl(null)
+    }
+    if (refZoomUrl) {
+      document.addEventListener('keydown', handleKey)
+    }
+    return () => {
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [refZoomUrl])
   return (
     <div className="space-y-8">
       <header className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
@@ -1940,6 +2053,27 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
             className="mt-6 h-10 rounded-md bg-gray-700 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:bg-gray-300 disabled:text-gray-600"
           >
             {isRenamingProject ? '重命名中…' : '重命名'}
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                const name = (projectName || 'Storyboard Project').trim()
+                const project = await createProject(name, 'Storyboard created via header')
+                setProjectId(project.id)
+                const projects = await getProjects()
+                setExistingProjects(projects)
+                setStatus({ type: 'success', text: `项目已创建：${project.name}` })
+              } catch (e) {
+                console.error('Create project failed', e)
+                setStatus({ type: 'error', text: '新建项目失败。' })
+              }
+            }}
+            className="mt-6 h-10 rounded-md bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700"
+            aria-label="新增项目"
+            title="在当前名称下创建一个新项目"
+          >
+            新增项目
           </button>
           <p className="text-xs text-gray-500">
             The project name is used when downloading images and preparing Veo prompts.
@@ -2042,6 +2176,183 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
         <p className="mt-2 text-xs text-gray-500">载入后可以继续进行参考图选择、批量替换、图片生成与 Veo3 视频提交。</p>
       </section>
 
+      {/* 右侧悬浮参考图折叠面板 */}
+      {referenceImages.length > 0 && (
+        <div className="fixed right-4 top-[calc(50%-220px)] z-50 hidden w-72 md:block">
+          {/* 参考图折叠面板 */}
+          <div className="rounded-lg border border-gray-200 bg-white/95 shadow">
+            <button
+              type="button"
+              onClick={() => setIsRefPanelOpen(prev => !prev)}
+              className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              aria-expanded={isRefPanelOpen}
+            >
+              <span>Reference images（按顺序使用⬇）</span>
+              <span className="ml-2 inline-block rounded bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600">{selectedReferenceImages.length}</span>
+            </button>
+            {isRefPanelOpen && (
+              <div className="px-3 pb-3">
+                <div className="flex flex-wrap gap-2 max-h-72 overflow-y-auto overflow-x-hidden pr-1">
+                  {referenceImages.map((image) => {
+                    const isSelected = selectedReferenceIds.includes(image.id)
+                    const orderedIndex = isSelected ? selectedReferenceIds.findIndex(id => id === image.id) + 1 : null
+                    return (
+                      <button
+                        key={image.id}
+                        type="button"
+                        onClick={() => toggleReferenceSelection(image.id)}
+                        className={`group relative flex items-center gap-2 rounded border px-2 py-1 text-xs ${isSelected ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600'}`}
+                        title={image.label ?? image.url}
+                      >
+                        <span className="relative h-8 w-8 overflow-hidden rounded bg-gray-100">
+                          <img
+                            src={resolvedRefUrlMap[image.id] ?? image.url}
+                            alt={image.label ?? 'Reference'}
+                            loading="lazy"
+                            referrerPolicy="no-referrer"
+                            onError={e => {
+                              const imgEl = e.currentTarget as HTMLImageElement
+                              imgEl.src = '/file.svg'
+                              imgEl.classList.remove('object-cover')
+                              imgEl.classList.add('object-contain')
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setRefZoomUrl(resolvedRefUrlMap[image.id] ?? image.url)
+                            }}
+                            className="h-full w-full cursor-zoom-in object-cover transition-transform duration-150 group-hover:scale-110"
+                          />
+                          {orderedIndex && (
+                            <span className="absolute left-0 top-0 rounded-br bg-blue-600 px-1 text-[10px] text-white">
+                              {orderedIndex}
+                            </span>
+                          )}
+                        </span>
+                        <span className="max-w-[160px] truncate text-left">
+                          {image.label ?? image.url}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+                {selectedReferenceImages.length > 0 && (
+                  <p className="mt-2 text-[11px] text-gray-500">
+                    已选择 {selectedReferenceImages.length} 张参考图，使用顺序：{' '}
+                    {selectedReferenceImages.map((img, i) => `${i + 1}`).join(' → ')}
+                  </p>
+                )}
+                <div className="mt-2 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={loadMoreReferences}
+                    disabled={!refHasMore || isLoadingMoreRefs}
+                    className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isLoadingMoreRefs ? '加载中…' : '加载更多'}
+                  </button>
+                  {!refHasMore && referenceImages.length > 0 && (
+                    <span className="text-[11px] text-gray-500">没有更多参考图</span>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 右侧悬浮：预览镜头批量替换（默认折叠） */}
+          <div className="mt-2 rounded-lg border border-gray-200 bg-white/95 shadow">
+            <button
+              type="button"
+              onClick={() => setIsBulkPanelOpen(prev => !prev)}
+              className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              aria-expanded={isBulkPanelOpen}
+            >
+              <span>Bulk replace text in the original script</span>
+            </button>
+            {isBulkPanelOpen && (
+              <div className="px-3 pb-3">
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={bulkFind}
+                    onChange={event => setBulkFind(event.target.value)}
+                    className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Find text"
+                  />
+                  <input
+                    type="text"
+                    value={bulkReplaceValue}
+                    onChange={event => setBulkReplaceValue(event.target.value)}
+                    className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Replace with"
+                  />
+                  <p className="text-[11px] text-gray-500">结构化 prompt 字段在可用时会更新。</p>
+                </div>
+
+                {/* 替换选项（按顺序执行，可编辑并可新增） */}
+                <div className="mt-2 space-y-2">
+                  <p className="text-[11px] text-gray-700">替换选项（按顺序执行，可编辑并可新增）</p>
+                  <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                    {bulkRules.map((rule, idx) => (
+                      <div key={rule.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start gap-2">
+                        <input
+                          type="text"
+                          value={rule.find}
+                          onChange={e => setBulkRules(prev => prev.map(r => (r.id === rule.id ? { ...r, find: e.target.value } : r)))}
+                          className="w-full rounded-md border border-gray-300 px-2 py-1 text-[11px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder={`Find（例如：角色${String.fromCharCode(65 + idx)})`}
+                        />
+                        <input
+                          type="text"
+                          value={rule.replace}
+                          onChange={e => setBulkRules(prev => prev.map(r => (r.id === rule.id ? { ...r, replace: e.target.value } : r)))}
+                          className="w-full rounded-md border border-gray-300 px-2 py-1 text-[11px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder={`Replace with（例如：参考图${idx + 1})`}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setBulkRules(prev => prev.filter(r => r.id !== rule.id))}
+                          className="rounded-md border border-gray-300 px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-100"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setBulkRules(prev => [...prev, { id: (globalThis.crypto?.randomUUID?.() ?? `rule_${Date.now()}`), find: '', replace: '' }])}
+                      className="rounded-md border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-100"
+                    >
+                      新增规则
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleBulkReplaceSegments}
+                      className="rounded-md bg-gray-800 px-3 py-1 text-[11px] font-medium text-white hover:bg-gray-900"
+                    >
+                      Apply replace
+                    </button>
+                  </div>
+                </div>
+
+              </div>
+            )}
+          </div>
+          {/* 独立悬浮的批量生成按钮：位于“Bulk replace”按钮下方，不在其内容内 */}
+          <div className="mt-2 flex items-center justify-end">
+            <button
+              type="button"
+              onClick={handleGenerateImages}
+              disabled={isGeneratingImages || !isDoubaoSizeValid}
+              className="rounded-md bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isGeneratingImages ? `Generating ${imageProgress}%` : 'Generate images'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Floating right-side step tabs */}
       <nav className="fixed right-4 top-1/2 z-40 hidden -translate-y-1/2 flex-col space-y-2 md:flex">
         <a href="#step-1" className="rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 1 解析提示词</a>
@@ -2061,6 +2372,29 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
           }`}
         >
           {status.text}
+        </div>
+      )}
+      {/* 参考图放大遮罩：按比例显示，点击关闭 */}
+      {refZoomUrl && (
+        <div
+          className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/80"
+          onClick={() => setRefZoomUrl(null)}
+        >
+          <img
+            src={refZoomUrl}
+            alt="Reference preview"
+            className="max-h-[90vh] max-w-[90vw] rounded-md object-contain shadow-lg"
+          />
+          <button
+            type="button"
+            className="absolute right-4 top-4 rounded bg-white/80 px-3 py-1 text-sm text-gray-800 hover:bg-white"
+            onClick={(e) => {
+              e.stopPropagation()
+              setRefZoomUrl(null)
+            }}
+          >
+            关闭
+          </button>
         </div>
       )}
       <section className="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
@@ -2096,6 +2430,41 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
             >
               {isAnalyzing ? '分析中…' : '分析脚本'}
             </button>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const segmentsMapped = segments.map(s => ({
+                    id: s.id,
+                    scene: s.prompt?.subject?.action || s.prompt?.environment || '',
+                    prompt: s.promptText,
+                    characters: [],
+                    setting: s.prompt?.environment || '',
+                    mood: s.prompt?.time_of_day || ''
+                  }))
+                  if (!projectId) {
+                    setStatus({ type: 'info', text: '请先点击“新增项目”。' })
+                    return
+                  }
+                  if (!scriptId) {
+                    const script = await createScript(projectId, segmentsMapped, rawJson)
+                    setScriptId(script.id)
+                    setStatus({ type: 'success', text: '脚本已创建并保存原始脚本与分镜。' })
+                    return
+                  }
+                  const updated = await updateScript(scriptId, segmentsMapped, rawJson)
+                  setStatus({ type: 'success', text: '原始脚本与分镜已更新。' })
+                  setScriptId(updated.id)
+                } catch (e) {
+                  console.error('更新/创建脚本失败', e)
+                  setStatus({ type: 'error', text: '保存原始脚本失败。' })
+                }
+              }}
+              disabled={!rawJson.trim()}
+              className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-600"
+            >
+              保存原始脚本
+            </button>
           </div>
         </div>
         <textarea
@@ -2106,6 +2475,123 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
         />
         {parseError && <p className="text-sm text-red-600">{parseError}</p>}
         {analyzeError && <p className="text-sm text-red-600">{analyzeError}</p>}
+
+        {/* 参考视频模块（迁移到Step 1分析结果上方） */}
+        <div className="mt-4 rounded-md border border-dashed p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-800">YouTube参考视频</h3>
+            {isLoadingRefVideos && <span className="text-xs text-gray-500">加载参考视频…</span>}
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_auto]">
+            <input
+              type="url"
+              value={newYoutubeUrl}
+              onChange={e => setNewYoutubeUrl(e.target.value)}
+              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="粘贴 YouTube 视频链接，例如 https://youtu.be/xxxx 或 https://www.youtube.com/watch?v=xxxx"
+            />
+            <input
+              type="text"
+              value={newYoutubeLabel}
+              onChange={e => setNewYoutubeLabel(e.target.value)}
+              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="备注（可选）"
+            />
+            <button
+              type="button"
+              onClick={async () => {
+                const id = extractYouTubeId(newYoutubeUrl.trim())
+                if (!id) {
+                  setStatus({ type: 'error', text: '请输入有效的 YouTube 链接。' })
+                  return
+                }
+                if (!scriptId) {
+                  setStatus({ type: 'info', text: '请先创建或选择脚本，再保存参考视频。' })
+                  return
+                }
+                setIsAddingYoutube(true)
+                try {
+                  const item = await addReferenceVideo(newYoutubeUrl.trim(), newYoutubeLabel.trim() || undefined, scriptId)
+                  setReferenceVideos(prev => [item, ...prev])
+                  setNewYoutubeUrl('')
+                  setNewYoutubeLabel('')
+                  setStatus({ type: 'success', text: '参考视频已保存。' })
+                } catch (error) {
+                  console.error('保存参考视频失败', error)
+                  setStatus({ type: 'error', text: '保存参考视频失败。' })
+                } finally {
+                  setIsAddingYoutube(false)
+                }
+              }}
+              disabled={isAddingYoutube}
+              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isAddingYoutube ? '保存中…' : '保存到数据库'}
+            </button>
+          </div>
+
+          {/* 预览 iframe */}
+          {extractYouTubeId(newYoutubeUrl.trim()) && (
+            <div className="mt-3">
+              <div className="aspect-video w-full overflow-hidden rounded-md border">
+                <iframe
+                  src={`https://www.youtube.com/embed/${extractYouTubeId(newYoutubeUrl.trim())}`}
+                  title="YouTube preview"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                  className="h-full w-full"
+                />
+              </div>
+              <p className="mt-1 text-xs text-gray-500">预览仅根据粘贴的链接生成，不会自动播放。</p>
+            </div>
+          )}
+
+          {/* 已保存的参考视频列表 */}
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            {referenceVideos.map(video => {
+              const vid = extractYouTubeId(video.url)
+              return (
+                <div key={video.id} className="rounded-md border p-3">
+                  {vid ? (
+                    <div className="aspect-video w-full overflow-hidden rounded">
+                      <iframe
+                        src={`https://www.youtube.com/embed/${vid}`}
+                        title={video.label || 'YouTube reference'}
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                        allowFullScreen
+                        className="h-full w-full"
+                      />
+                    </div>
+                  ) : (
+                    <a href={video.url} target="_blank" rel="noreferrer" className="text-blue-600 text-sm hover:underline">{video.url}</a>
+                  )}
+                  <div className="mt-2 flex items-center justify-between text-xs text-gray-600">
+                    <span>{video.label || '未命名'}</span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await removeReferenceVideo(video.id)
+                          setReferenceVideos(prev => prev.filter(v => v.id !== video.id))
+                        } catch (err) {
+                          console.error('删除参考视频失败', err)
+                          setStatus({ type: 'error', text: '删除参考视频失败。' })
+                        }
+                      }}
+                      className="rounded border border-red-300 px-2 py-1 text-[11px] text-red-700 hover:bg-white"
+                      aria-label="删除参考视频"
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+            {!referenceVideos.length && (
+              <div className="rounded-md border border-dashed p-4 text-center text-xs text-gray-500">尚未保存参考视频。</div>
+            )}
+          </div>
+        </div>
         <div className="rounded-md border border-gray-200 bg-gray-50 p-4">
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-gray-800">脚本分析结果（Gemini）</h3>
@@ -2160,6 +2646,353 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
           )}
         </div>
 
+        {/* Gemini: 生成视频分镜提示词（文本） */}
+        <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-800">Gemini：生成视频分镜提示词（文本）</h3>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded border border-blue-300 px-2 py-1 text-[11px] text-blue-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                onClick={async () => {
+                  try {
+                    if (!rawJson.trim()) {
+                      setPromptError('请在上方粘贴原始脚本文本或JSON/CSV。')
+                      return
+                    }
+                    setPromptError(null)
+                    setIsPrompting(true)
+                    const res = await fetch('/api/storyboard-prompts', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ scriptText: rawJson })
+                    })
+                    const data = await res.json().catch(() => ({}))
+                    const text = data?.text ? String(data.text) : ''
+                    setPromptCsv(text)
+                  } catch (error) {
+                    console.error('生成分镜提示词失败', error)
+                    setPromptError('生成分镜提示词失败。')
+                  } finally {
+                    setIsPrompting(false)
+                  }
+                }}
+                disabled={isPrompting || !rawJson.trim()}
+              >
+                {isPrompting ? '生成中…' : '生成分镜文本'}
+              </button>
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                onClick={() => promptCsv && handleCopy(promptCsv)}
+                disabled={!promptCsv}
+              >
+                复制
+              </button>
+              <button
+                type="button"
+                className="rounded border border-green-300 px-2 py-1 text-[11px] text-green-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                onClick={() => promptCsv && setRawJson(promptCsv)}
+                disabled={!promptCsv}
+                title="将生成的文本覆盖到原始脚本文本框"
+              >
+                覆盖到原始脚本
+              </button>
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                onClick={() => { setPromptCsv(''); setPromptError(null) }}
+              >
+                清除
+              </button>
+            </div>
+          </div>
+          {promptError && <p className="text-xs text-red-600">{promptError}</p>}
+          {promptCsv ? (
+            <textarea
+              value={promptCsv}
+              readOnly
+              className="h-32 w-full rounded-md border border-blue-200 px-3 py-2 text-xs font-mono bg-white"
+            />
+          ) : (
+            <p className="text-xs text-blue-700">粘贴原始脚本后点击“生成分镜文本”。输出为纯文本，每行一条，不会直接更改分镜预览。</p>
+          )}
+        </div>
+
+        {/* Gemini: 世界观改写脚本 */}
+        <div className="mt-4 rounded-md border border-indigo-200 bg-indigo-50 p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-800">Gemini：世界观改写脚本（CSV）</h3>
+            <div className="flex items-center gap-2">
+              <select
+                value={worldview}
+                onChange={e => setWorldview(e.target.value)}
+                className="rounded border border-indigo-300 px-2 py-1 text-[11px] text-indigo-700 bg-white"
+              >
+                {worldviews.map((wv, idx) => (
+                  <option key={idx} value={wv}>{wv}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                onClick={async () => {
+                  try {
+                    setWorldviewSavedInfo('')
+                    const res = await fetch(`/api/worldview-settings?name=${encodeURIComponent(worldview)}`)
+                    const data = await res.json().catch(() => ({}))
+                    const item = data?.item
+                    if (item) {
+                      setWorldviewCore(item.core || '')
+                      setWorldviewElements(item.elements || '')
+                      setWorldviewReferences(item.references || '')
+                      setWorldviewSavedInfo('已加载数据库设定')
+                    } else {
+                      setWorldviewSavedInfo('数据库无记录')
+                    }
+                  } catch {
+                    setWorldviewSavedInfo('读取失败')
+                  }
+                }}
+              >
+                读取设定
+              </button>
+              <button
+                type="button"
+                className="rounded border border-indigo-300 px-2 py-1 text-[11px] text-indigo-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                onClick={async () => {
+                  try {
+                    if (!rawJson.trim()) {
+                      setWorldviewError('请在上方粘贴原始脚本文本或JSON/CSV。')
+                      return
+                    }
+                    setWorldviewError(null)
+                    setIsRewriting(true)
+                    const res = await fetch('/api/worldview-rewrite', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ scriptText: rawJson, worldview, core: worldviewCore, elements: worldviewElements, references: worldviewReferences })
+                    })
+                    const data = await res.json().catch(() => ({}))
+                    const csv = data?.csv ? String(data.csv) : ''
+                    setWorldviewResult(csv)
+                  } catch (error) {
+                    console.error('世界观改写失败', error)
+                    setWorldviewError('世界观改写失败。')
+                  } finally {
+                    setIsRewriting(false)
+                  }
+                }}
+                disabled={isRewriting || !rawJson.trim()}
+              >
+                {isRewriting ? '改写中…' : '应用世界观并改写为CSV'}
+              </button>
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                onClick={() => worldviewResult && handleCopy(worldviewResult)}
+                disabled={!worldviewResult}
+              >
+                复制
+              </button>
+              <button
+                type="button"
+                className="rounded border border-green-300 px-2 py-1 text-[11px] text-green-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                onClick={() => worldviewResult && setRawJson(worldviewResult)}
+                disabled={!worldviewResult}
+                title="将改写的CSV覆盖到原始脚本文本框"
+              >
+                覆盖到原始脚本
+              </button>
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                onClick={() => { setWorldviewResult(''); setWorldviewError(null) }}
+              >
+                清除
+              </button>
+            </div>
+          </div>
+          {/* 世界观细节编辑：核心设定 / 关键元素 / 参考案例 */}
+          <div className="mb-2 grid grid-cols-1 gap-2 md:grid-cols-3">
+            <div>
+              <label className="mb-1 block text-[11px] text-gray-600">核心设定</label>
+              <textarea
+                value={worldviewCore}
+                onChange={e => setWorldviewCore(e.target.value)}
+                placeholder="例如：世界基调压抑残酷……"
+                className="h-20 w-full rounded-md border border-indigo-200 px-2 py-1 text-[11px] bg-white"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] text-gray-600">关键元素（逗号分隔）</label>
+              <textarea
+                value={worldviewElements}
+                onChange={e => setWorldviewElements(e.target.value)}
+                placeholder="例如：腐化的魔法, 畸形怪物, …"
+                className="h-20 w-full rounded-md border border-indigo-200 px-2 py-1 text-[11px] bg-white"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] text-gray-600">参考案例（逗号分隔）</label>
+              <textarea
+                value={worldviewReferences}
+                onChange={e => setWorldviewReferences(e.target.value)}
+                placeholder="例如：《黑暗之魂》,《血源诅咒》, …"
+                className="h-20 w-full rounded-md border border-indigo-200 px-2 py-1 text-[11px] bg-white"
+              />
+            </div>
+          </div>
+          <div className="mb-2 flex items-center gap-2">
+            <button
+              type="button"
+              className="rounded border border-indigo-300 px-2 py-1 text-[11px] text-indigo-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+              onClick={async () => {
+                try {
+                  setIsSavingWorldview(true)
+                  setWorldviewSavedInfo('')
+                  const res = await fetch('/api/worldview-settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: worldview, core: worldviewCore, elements: worldviewElements, references: worldviewReferences })
+                  })
+                  if (!res.ok) throw new Error('save failed')
+                  setWorldviewSavedInfo('已保存到数据库')
+                } catch {
+                  setWorldviewSavedInfo('保存失败')
+                } finally {
+                  setIsSavingWorldview(false)
+                }
+              }}
+              disabled={isSavingWorldview}
+            >
+              {isSavingWorldview ? '保存中…' : '保存设定'}
+            </button>
+            {worldviewSavedInfo && (
+              <span className="text-[11px] text-gray-700">{worldviewSavedInfo}</span>
+            )}
+          </div>
+          {/* 世界观预设管理区：新增 / 编辑 / 删除 */}
+          <div className="mb-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={newWorldview}
+                onChange={e => setNewWorldview(e.target.value)}
+                placeholder="新增世界观，例如：魔幻现实主义"
+                className="rounded border border-indigo-200 px-2 py-1 text-[11px] bg-white text-gray-800 w-56"
+              />
+              <button
+                type="button"
+                className="rounded border border-indigo-300 px-2 py-1 text-[11px] text-indigo-700 hover:bg-white"
+                onClick={() => {
+                  const v = newWorldview.trim()
+                  if (!v) return
+                  if (worldviews.includes(v)) {
+                    setWorldview(v)
+                    setNewWorldview('')
+                    return
+                  }
+                  const next = [...worldviews, v]
+                  setWorldviews(next)
+                  setWorldview(v)
+                  setNewWorldview('')
+                }}
+              >
+                添加世界观
+              </button>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {worldviews.map((wv, idx) => (
+                <div key={wv} className="flex items-center gap-2 rounded border border-indigo-200 bg-white px-2 py-1">
+                  {editingKey === wv ? (
+                    <>
+                      <input
+                        type="text"
+                        value={editingText}
+                        onChange={e => setEditingText(e.target.value)}
+                        className="rounded border border-indigo-200 px-2 py-1 text-[11px] text-gray-800"
+                      />
+                      <button
+                        type="button"
+                        className="rounded border border-green-300 px-2 py-1 text-[11px] text-green-700 hover:bg-white"
+                        onClick={() => {
+                          const v = editingText.trim()
+                          if (!v) { setEditingKey(null); setEditingText(''); return }
+                          const dup = worldviews.some((x, i) => i !== idx && x === v)
+                          if (dup) { setEditingKey(null); setEditingText(''); setWorldview(v); return }
+                          const next = [...worldviews]
+                          const wasSelected = worldview === next[idx]
+                          next[idx] = v
+                          setWorldviews(next)
+                          if (wasSelected) setWorldview(v)
+                          setEditingKey(null)
+                          setEditingText('')
+                        }}
+                      >
+                        保存
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                        onClick={() => { setEditingKey(null); setEditingText('') }}
+                      >
+                        取消
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className={`rounded px-2 py-1 text-[11px] ${worldview === wv ? 'bg-indigo-600 text-white' : 'border border-indigo-300 text-indigo-700 hover:bg-white'}`}
+                        onClick={() => setWorldview(wv)}
+                        title="选择此世界观"
+                      >
+                        {wv}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                        onClick={() => { setEditingKey(wv); setEditingText(wv) }}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded border border-red-300 px-2 py-1 text-[11px] text-red-700 hover:bg-white"
+                        onClick={() => {
+                          const next = worldviews.filter((_, i) => i !== idx)
+                          setWorldviews(next)
+                          if (worldview === wv) {
+                            setWorldview(next[0] ?? '赛博朋克')
+                          }
+                          fetch('/api/worldview-settings', {
+                            method: 'DELETE',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ name: wv })
+                          }).catch(() => {})
+                        }}
+                      >
+                        删除
+                      </button>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+          {worldviewError && <p className="text-xs text-red-600">{worldviewError}</p>}
+          {worldviewResult ? (
+            <textarea
+              value={worldviewResult}
+              readOnly
+              className="h-32 w-full rounded-md border border-indigo-200 px-3 py-2 text-xs font-mono bg-white"
+            />
+          ) : (
+            <p className="text-xs text-indigo-700">选择世界观并填写“核心设定/关键元素/参考案例”，点击“应用世界观并改写为CSV”。输出为CSV文本。</p>
+          )}
+        </div>
+
       {/* 历史模块：在回填不完整时显示（可折叠） */}
       {showHistoryModule && (
         <div className="mt-4 rounded-md border border-yellow-200 bg-yellow-50 p-4">
@@ -2202,13 +3035,200 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
               {historyImages.length > 0 && (
                 <div>
                   <h4 className="text-sm font-medium text-gray-700">历史图片</h4>
+                  {/* 历史图片补充：粘贴/URL 添加与本地上传 */}
+                  <form
+                    onSubmit={async (event) => {
+                      event.preventDefault()
+                      try {
+                        const targetScriptId = selectedExistingScriptId || scriptId
+                        if (!targetScriptId) {
+                          setStatus({ type: 'error', text: '请先选择或创建脚本，再补充历史图片。' })
+                          return
+                        }
+                        const url = newHistoryUrl.trim()
+                        const isValidUrl = /^https?:\/\/\S+/.test(url) || /^data:image\//i.test(url)
+                        if (!isValidUrl) {
+                          setStatus({ type: 'error', text: '请输入有效的图片 URL（http/https 或 data:image）。' })
+                          return
+                        }
+                        const prompt = (newHistoryPrompt || '').trim() || 'Manual upload'
+                        const shotNumber = (newHistoryShotNumber || '').trim() ? Number(newHistoryShotNumber) : undefined
+                        setIsAddingHistory(true)
+                        const image = await createGeneratedImage(targetScriptId, prompt, url, shotNumber)
+                        setHistoryImages(prev => [image, ...prev])
+                        setNewHistoryUrl('')
+                        setNewHistoryPrompt('')
+                        setNewHistoryShotNumber('')
+                        setStatus({ type: 'success', text: '已添加到历史图片。' })
+                      } catch (err) {
+                        console.error('Failed to add history image', err)
+                        setStatus({ type: 'error', text: '添加历史图片失败。' })
+                      } finally {
+                        setIsAddingHistory(false)
+                      }
+                    }}
+                    className="mt-2 grid gap-2 md:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_minmax(0,1fr)_auto]"
+                  >
+                    <input
+                      type="url"
+                      value={newHistoryUrl}
+                      onChange={e => setNewHistoryUrl(e.target.value)}
+                      onPaste={async (event) => {
+                        try {
+                          const targetScriptId = selectedExistingScriptId || scriptId
+                          if (!targetScriptId) return
+                          const dt = event.clipboardData
+                          if (!dt) return
+                          // 优先处理剪贴板中的图片文件
+                          const items = Array.from(dt.items || [])
+                          for (const it of items) {
+                            if (it.kind === 'file' && it.type?.startsWith('image/')) {
+                              const file = it.getAsFile()
+                              if (file) {
+                                event.preventDefault()
+                                const dataUrl = await fileToDataUrl(file)
+                                const prompt = (newHistoryPrompt || '').trim() || 'Manual upload'
+                                const shotNumber = (newHistoryShotNumber || '').trim() ? Number(newHistoryShotNumber) : undefined
+                                const image = await createGeneratedImage(targetScriptId, prompt, dataUrl, shotNumber)
+                                setHistoryImages(prev => [image, ...prev])
+                                setNewHistoryUrl('')
+                                setNewHistoryPrompt('')
+                                setNewHistoryShotNumber('')
+                                setStatus({ type: 'success', text: '已从剪贴板图片添加到历史。' })
+                                return
+                              }
+                            }
+                          }
+                          // 退化为文本 URL（http/https 或 data:image）
+                          const text = dt.getData('text')?.trim()
+                          if (text && (/^https?:\/\/\S+/.test(text) || /^data:image\//i.test(text))) {
+                            event.preventDefault()
+                            const prompt = (newHistoryPrompt || '').trim() || 'Manual upload'
+                            const shotNumber = (newHistoryShotNumber || '').trim() ? Number(newHistoryShotNumber) : undefined
+                            const image = await createGeneratedImage(targetScriptId, prompt, text, shotNumber)
+                            setHistoryImages(prev => [image, ...prev])
+                            setNewHistoryUrl('')
+                            setNewHistoryPrompt('')
+                            setNewHistoryShotNumber('')
+                            setStatus({ type: 'success', text: '已从剪贴板文本添加到历史。' })
+                            return
+                          }
+                        } catch (err: any) {
+                          console.error('处理剪贴板失败', err)
+                          setStatus({ type: 'error', text: err?.message || '处理剪贴板失败' })
+                        }
+                      }}
+                      className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="粘贴历史图片 URL 或剪贴板图片"
+                    />
+                    <input
+                      type="text"
+                      value={newHistoryPrompt}
+                      onChange={e => setNewHistoryPrompt(e.target.value)}
+                      className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="提示词（可选）"
+                    />
+                    <input
+                      type="number"
+                      value={newHistoryShotNumber}
+                      onChange={e => setNewHistoryShotNumber(e.target.value)}
+                      className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="镜头号（可选）"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isAddingHistory}
+                      className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isAddingHistory ? 'Adding…' : '添加到历史'}
+                    </button>
+                  </form>
+                  <form
+                    onSubmit={async (event) => {
+                      event.preventDefault()
+                      const file = newHistoryFile
+                      try {
+                        const targetScriptId = selectedExistingScriptId || scriptId
+                        if (!targetScriptId) {
+                          setStatus({ type: 'error', text: '请先选择或创建脚本，再上传历史图片。' })
+                          return
+                        }
+                        if (!file) {
+                          setStatus({ type: 'error', text: '请选择要上传的图片文件。' })
+                          return
+                        }
+                        setIsUploadingHistory(true)
+                        let finalUrl: string | null = null
+                        let usedDataUrlFallback = false
+                        if (!isDemoMode && (supabase as any)?.storage) {
+                          try {
+                            const ext = (file.name.split('.').pop() || 'png').toLowerCase()
+                            const path = `generated-images/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`
+                            const { error: uploadError } = await supabase.storage
+                              .from('generated-images')
+                              .upload(path, file, { upsert: false, contentType: file.type || `image/${ext}` })
+                            if (uploadError) {
+                              throw uploadError
+                            }
+                            const { data: publicData } = supabase.storage.from('generated-images').getPublicUrl(path)
+                            finalUrl = publicData?.publicUrl || null
+                          } catch (err) {
+                            console.warn('Supabase Storage upload failed (bucket missing?), falling back to Data URL.', err)
+                          }
+                        }
+                        if (!finalUrl) {
+                          finalUrl = await fileToDataUrl(file)
+                          usedDataUrlFallback = true
+                        }
+                        const shotNumber = (newHistoryShotNumber || '').trim() ? Number(newHistoryShotNumber) : undefined
+                        const prompt = (newHistoryPrompt || '').trim() || 'Manual upload'
+                        const image = await createGeneratedImage(targetScriptId, prompt, finalUrl!, shotNumber)
+                        setHistoryImages(prev => [image, ...prev])
+                        setNewHistoryFile(null)
+                        setNewHistoryPrompt('')
+                        setNewHistoryShotNumber('')
+                        setNewHistoryUrl('')
+                        setStatus({ type: 'success', text: usedDataUrlFallback ? '历史图片已上传（使用本地 Data URL）。' : '历史图片已上传。' })
+                      } catch (error) {
+                        console.error('Failed to upload history image', error)
+                        setStatus({ type: 'error', text: '上传历史图片失败。' })
+                      } finally {
+                        setIsUploadingHistory(false)
+                      }
+                    }}
+                    className="mt-2 flex items-center gap-2"
+                  >
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={e => setNewHistoryFile(e.target.files?.[0] || null)}
+                      className="text-xs"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isUploadingHistory}
+                      className="rounded-md bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isUploadingHistory ? 'Uploading…' : '上传本地图片'}
+                    </button>
+                  </form>
                   <div className="mt-2 grid grid-cols-3 gap-2 md:grid-cols-6">
                     {historyImages.map(img => (
-                      <div key={img.id} className="rounded border border-gray-200 p-1">
+                      <div key={img.id} className={`rounded border p-1 ${selectedHistoryIds.includes(img.id) ? 'border-blue-400 bg-blue-50' : 'border-gray-200'}`}>
                         <div
                           className="relative w-full overflow-hidden rounded bg-gray-100"
                           style={{ paddingTop: historyAspect === '9:16' ? '177.78%' : '56.25%' }}
                         >
+                          <div className="absolute left-1 top-1 z-10">
+                            <input
+                              type="checkbox"
+                              checked={selectedHistoryIds.includes(img.id)}
+                              onChange={() => toggleHistorySelection(img.id)}
+                              className="h-3 w-3 accent-blue-600"
+                              title="选择图片"
+                              aria-label="选择历史图片"
+                            />
+                          </div>
                           <img
                             src={img.image_url}
                             alt={img.prompt || 'generated image'}
@@ -2242,6 +3262,28 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                               下载
                             </button>
                           </div>
+                        </div>
+                        <div className="mt-1 flex items-center gap-2">
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            value={editingHistoryShot[img.id] ?? (typeof img.shot_number === 'number' ? String(img.shot_number) : '')}
+                            onChange={e => setEditingHistoryShot(prev => ({ ...prev, [img.id]: e.target.value }))}
+                            className="w-20 rounded border border-gray-300 px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            placeholder="镜头号"
+                            aria-label="镜头号"
+                          />
+                          <button
+                            type="button"
+                            className="rounded border border-blue-600 px-2 py-1 text-[11px] text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={() => handleUpdateHistoryShot(img)}
+                            disabled={!!updatingHistoryShot[img.id]}
+                          >
+                            {updatingHistoryShot[img.id] ? '保存中…' : '设置镜头号'}
+                          </button>
+                          {typeof img.shot_number === 'number' && (
+                            <span className="text-[11px] text-gray-500">当前：{img.shot_number}</span>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -2291,87 +3333,16 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
       )}
       </section>
 
-      <div ref={step2SentinelRef} aria-hidden className="h-16" />
+      <div ref={step2SentinelRef} aria-hidden />
  
-       <section ref={step2SectionRef} className={`sticky top-16 z-30 rounded-lg border border-gray-200 bg-white p-6 shadow-sm ${isStep2Stuck ? 'opacity-90' : ''}`}>
+        <section ref={step2SectionRef} className={`rounded-lg border border-gray-200 bg-white p-6 shadow-sm`}>
          <div className="flex items-center justify-between">
            <h2 id="step-2" className="text-lg font-semibold text-gray-900">Step 2 - Preview shots</h2>
            {hasSegments && <span className="text-xs text-gray-500">{segments.length} shots</span>}
          </div>
 
-        {/* Reference images (选择与预览) */}
-        {referenceImages.length > 0 && (
-          <div className="mt-4 space-y-2">
-            <p className="text-sm font-medium text-gray-700">Reference images（按顺序使用）</p>
-            <div className="flex flex-wrap gap-2">
-              {referenceImages.map((image, idx) => {
-                const isSelected = selectedReferenceIds.includes(image.id)
-                const orderedIndex = isSelected
-                  ? selectedReferenceIds.findIndex(id => id === image.id) + 1
-                  : null
-                return (
-                  <div
-                    key={image.id}
-                    className={`group relative flex items-center gap-2 rounded border px-2 py-1 text-xs ${
-                      isSelected ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600'
-                    }`}
-                    title={image.label ?? image.url}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => toggleReferenceSelection(image.id)}
-                      className="flex items-center gap-2"
-                    >
-                      <span className="relative h-8 w-8 overflow-hidden rounded bg-gray-100">
-                        <img
-                          src={resolvedRefUrlMap[image.id] ?? image.url}
-                          alt={image.label ?? 'Reference'}
-                          loading="lazy"
-                          referrerPolicy="no-referrer"
-                          onError={e => {
-                            const imgEl = e.currentTarget as HTMLImageElement
-                            imgEl.src = '/file.svg'
-                            imgEl.classList.remove('object-cover')
-                            imgEl.classList.add('object-contain')
-                          }}
-                          className="h-full w-full object-cover transition-transform duration-150 group-hover:scale-110"
-                        />
-                        {orderedIndex && (
-                          <span className="absolute left-0 top-0 rounded-br bg-blue-600 px-1 text-[10px] text-white">
-                            {orderedIndex}
-                          </span>
-                        )}
-                      </span>
-                      <span className="max-w-[180px] truncate text-left">
-                        {image.label ?? image.url}
-                      </span>
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
-            {selectedReferenceImages.length > 0 && (
-              <p className="text-xs text-gray-500">
-                已选择 {selectedReferenceImages.length} 张参考图，使用顺序：{' '}
-                {selectedReferenceImages.map((img, i) => `${i + 1}`).join(' → ')}
-              </p>
-            )}
-            <div className="mt-2">
-              <button
-                type="button"
-                onClick={loadMoreReferences}
-                disabled={!refHasMore || isLoadingMoreRefs}
-                className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isLoadingMoreRefs ? '加载中…' : '加载更多'}
-              </button>
-              {!refHasMore && referenceImages.length > 0 && (
-                <span className="ml-2 text-xs text-gray-500">没有更多参考图</span>
-              )}
-            </div>
-          </div>
-        )}
-        {hasSegments && !isStep2Stuck && (
+        {/* Reference images（按顺序使用）已移至右侧悬浮面板 */}
+        {hasSegments && (
           <div className="mt-4 space-y-3 rounded-md border border-gray-200 bg-gray-50 p-4">
             <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
               <p className="text-sm font-medium text-gray-700">Bulk replace text in the preview shots</p>
@@ -2485,7 +3456,7 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                     </label>
                   </div>
                 </div>
-                <div className="rounded-md bg-gray-50 p-3 text-xs leading-relaxed text-gray-600 whitespace-pre-wrap">
+                <div className="rounded-md bg-gray-50 p-3 text-sm leading-relaxed text-gray-600 whitespace-pre-wrap">
                   {segment.promptText}
                 </div>
                 <details className="group">
@@ -2500,7 +3471,7 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                           const updated = { ...segment, promptText: e.target.value }
                           setSegments(prev => prev.map(s => (s.id === segment.id ? updated : s)))
                         }}
-                        className="h-24 w-full rounded-md border border-gray-300 px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="h-24 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                         placeholder="可直接编辑文本"
                       />
                     </div>
@@ -2510,21 +3481,10 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                         id={`shot-characters-${segment.id}`}
                         type="text"
                         value={segment.prompt?.subject?.characters_present ?? ''}
-                        onChange={e => {
-                          const updated = {
-                            ...segment,
-                            prompt: {
-                              ...(segment.prompt ?? {}),
-                              subject: {
-                                ...(segment.prompt?.subject ?? {}),
-                                characters_present: e.target.value
-                              }
-                            }
-                          }
-                          setSegments(prev => prev.map(s => (s.id === segment.id ? updated : s)))
-                        }}
+                        readOnly
+                        disabled
                         className="w-full rounded-md border border-gray-300 px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="例如：角色A，角色B（可逗号分隔）"
+                        placeholder="单个镜头编辑已禁用"
                       />
                     </div>
                   </div>
@@ -2813,7 +3773,11 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                                 img.classList.remove('object-cover')
                                 img.classList.add('object-contain')
                               }}
-                              className="h-full w-full object-cover"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setRefZoomUrl(image.url)
+                              }}
+                              className="h-full w-full cursor-zoom-in object-cover"
                             />
                           </span>
                           <span className="max-w-[160px] truncate text-left">
@@ -2869,6 +3833,8 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
             </button>
           </div>
         </div>
+
+        
       </section>
       <section className="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -3182,7 +4148,7 @@ const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
                     Edit shot text
                   </summary>
                   <div className="mt-2">
-                    <label htmlFor={`shot-text-${segment.id}`} className="block text-xs font-medium text-gray-600">Shot text (JSON)</label>
+                    <label htmlFor={`shot-text-${segment.id}`} className="block text-sm font-medium text-gray-600">Shot text (JSON)</label>
                     <textarea
                       id={`shot-text-${segment.id}`}
                       value={segment.promptText ?? ''}

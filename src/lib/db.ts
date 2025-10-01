@@ -1,6 +1,6 @@
 import { supabase, isDemoMode } from './supabase'
 import { getCurrentUser } from './auth'
-import { Project, Script, ScriptSegment, GeneratedImage, ReferenceImage, ApiKeySettings, GeneratedVideo } from './types'
+import { Project, Script, ScriptSegment, GeneratedImage, ReferenceImage, ApiKeySettings, GeneratedVideo, ReferenceVideo } from './types'
 
 // Demo mode data storage
 const demoProjects: Project[] = [
@@ -73,22 +73,26 @@ export async function createProject(name: string, description: string): Promise<
     return project
   }
 
-  const { data, error } = await supabase
-    .from('projects')
-    .insert({
-      name,
-      description,
-      user_id: user.id,
-      created_at: new Date().toISOString()
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description })
     })
-    .select()
-    .single()
-
-  // Fallback to demo storage if table missing
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.projects' missing; using local demo storage.")
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.error('API:create project failed', err)
+      throw new Error(`Create project failed: ${res.status}`)
+    }
+    const data = await res.json()
+    const item = data.item as Project
+    return item
+  } catch (error) {
+    console.error('Failed to create project via API', error)
+    // 兼容回退：若 API 不可用，避免阻断流程，创建一个本地占位项目
     const project: Project = {
-      id: `demo_${Date.now()}`,
+      id: `local_${Date.now()}`,
       name,
       description,
       user_id: user.id,
@@ -97,9 +101,6 @@ export async function createProject(name: string, description: string): Promise<
     demoProjects.unshift(project)
     return project
   }
-
-  if (error) throw error
-  return data
 }
 
 export async function getProjects(): Promise<Project[]> {
@@ -109,20 +110,20 @@ export async function getProjects(): Promise<Project[]> {
     return demoProjects.filter(p => p.user_id === user.id)
   }
 
-  const { data, error } = await supabase
-    .from('projects')
-    .select('*')
-    .eq('user_id', user.id)
-    .order('created_at', { ascending: false })
-
-  // Fallback to demo storage if table missing
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.projects' missing; using local demo storage.")
-    return demoProjects.filter(p => p.user_id === user.id)
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/projects`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.error('API:get projects failed', err)
+      return []
+    }
+    const data = await res.json()
+    return (data.items as Project[]) || []
+  } catch (error) {
+    console.error('Failed to load projects via API', error)
+    return []
   }
-
-  if (error) throw error
-  return data || []
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
@@ -159,126 +160,57 @@ export async function deleteProject(projectId: string): Promise<void> {
     return
   }
 
-  // Supabase delete cascade: images -> videos -> scripts -> project
-  // Fetch script ids for project
-  const { data: scriptRows, error: scriptQueryErr } = await supabase
-    .from('scripts')
-    .select('id')
-    .eq('project_id', projectId)
-
-  if (scriptQueryErr?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.scripts' missing; using local demo storage.")
-    // Fallback to demo mutation
-    const scriptIds = demoScripts.filter(s => s.project_id === projectId).map(s => s.id)
-    for (let i = demoProjects.length - 1; i >= 0; i--) {
-      if (demoProjects[i].id === projectId && demoProjects[i].user_id === user.id) {
-        demoProjects.splice(i, 1)
-      }
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/projects`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: projectId })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to delete project (HTTP ${res.status})`)
     }
-    for (let i = demoScripts.length - 1; i >= 0; i--) {
-      if (demoScripts[i].project_id === projectId) {
-        demoScripts.splice(i, 1)
-      }
-    }
-    for (let i = demoImages.length - 1; i >= 0; i--) {
-      if (scriptIds.includes(demoImages[i].script_id)) {
-        demoImages.splice(i, 1)
-      }
-    }
-    for (let i = demoVideos.length - 1; i >= 0; i--) {
-      const sid = demoVideos[i].script_id
-      if (sid && scriptIds.includes(sid)) {
-        demoVideos.splice(i, 1)
-      }
-    }
-    return
+    // Optionally, we could use returned deleted counts
+    await res.json().catch(() => null)
+  } catch (error) {
+    console.error('Failed to delete project via API', error)
+    throw error
   }
-
-  if (scriptQueryErr) throw scriptQueryErr
-
-  const scriptIds = (scriptRows || []).map((r: { id: string }) => r.id)
-
-  if (scriptIds.length > 0) {
-    const { error: imgDelErr } = await supabase
-      .from('generated_images')
-      .delete()
-      .in('script_id', scriptIds)
-    if (imgDelErr && imgDelErr.code !== 'PGRST205') throw imgDelErr
-
-    const { error: vidDelErr } = await supabase
-      .from('generated_videos')
-      .delete()
-      .in('script_id', scriptIds)
-    if (vidDelErr && vidDelErr.code !== 'PGRST205') throw vidDelErr
-
-    const { error: scriptsDelErr } = await supabase
-      .from('scripts')
-      .delete()
-      .eq('project_id', projectId)
-    if (scriptsDelErr && scriptsDelErr.code !== 'PGRST205') throw scriptsDelErr
-  }
-
-  const { error: projDelErr } = await supabase
-    .from('projects')
-    .delete()
-    .eq('id', projectId)
-    .eq('user_id', user.id)
-
-  if (projDelErr?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.projects' missing; using local demo storage.")
-    // Fallback mutate local demo
-    for (let i = demoProjects.length - 1; i >= 0; i--) {
-      if (demoProjects[i].id === projectId && demoProjects[i].user_id === user.id) {
-        demoProjects.splice(i, 1)
-      }
-    }
-    return
-  }
-
-  if (projDelErr) throw projDelErr
 }
 
 // 脚本相关操作
-export async function createScript(projectId: string, content: ScriptSegment[]): Promise<Script> {
+export async function createScript(projectId: string, content: ScriptSegment[], rawText?: string): Promise<Script> {
   if (isDemoMode) {
     const script: Script = {
       id: `demo_script_${Date.now()}`,
       project_id: projectId,
       content,
       status: 'draft',
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      raw_text: rawText
     }
     demoScripts.unshift(script)
     return script
   }
 
-  const { data, error } = await supabase
-    .from('scripts')
-    .insert({
-      project_id: projectId,
-      content,
-      status: 'draft',
-      created_at: new Date().toISOString()
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/scripts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId, content, status: 'draft', raw_text: rawText })
     })
-    .select()
-    .single()
-
-  // Fallback to demo storage if table missing
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.scripts' missing; using local demo storage.")
-    const script: Script = {
-      id: `demo_script_${Date.now()}`,
-      project_id: projectId,
-      content,
-      status: 'draft',
-      created_at: new Date().toISOString()
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to create script (HTTP ${res.status})`)
     }
-    demoScripts.unshift(script)
-    return script
+    const data = await res.json()
+    return data.item as Script
+  } catch (error) {
+    console.error('Failed to create script via API', error)
+    throw error
   }
-
-  if (error) throw error
-  return data
 }
 
 export async function getScripts(projectId: string): Promise<Script[]> {
@@ -286,52 +218,51 @@ export async function getScripts(projectId: string): Promise<Script[]> {
     return demoScripts.filter(s => s.project_id === projectId)
   }
 
-  const { data, error } = await supabase
-    .from('scripts')
-    .select('*')
-    .eq('project_id', projectId)
-    .order('created_at', { ascending: false })
-
-  // Fallback to demo storage if table missing
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.scripts' missing; using local demo storage.")
-    return demoScripts.filter(s => s.project_id === projectId)
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const params = new URLSearchParams({ project_id: projectId })
+    const res = await fetch(`${baseOrigin}/api/scripts?${params.toString()}`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.error('API:get scripts failed', err)
+      return []
+    }
+    const data = await res.json()
+    return (data.items as Script[]) || []
+  } catch (error) {
+    console.error('Failed to load scripts via API', error)
+    return []
   }
-
-  if (error) throw error
-  return data || []
 }
 
-export async function updateScript(id: string, content: ScriptSegment[]): Promise<Script> {
+export async function updateScript(id: string, content: ScriptSegment[], rawText?: string): Promise<Script> {
   if (isDemoMode) {
     const index = demoScripts.findIndex(s => s.id === id)
     if (index !== -1) {
       demoScripts[index].content = content
+      demoScripts[index].raw_text = rawText
       return demoScripts[index]
     }
     throw new Error('Script not found')
   }
 
-  const { data, error } = await supabase
-    .from('scripts')
-    .update({ content })
-    .eq('id', id)
-    .select()
-    .single()
-
-  // Fallback to demo storage if table missing
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.scripts' missing; using local demo storage.")
-    const index = demoScripts.findIndex(s => s.id === id)
-    if (index !== -1) {
-      demoScripts[index].content = content
-      return demoScripts[index]
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/scripts`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, content, raw_text: rawText })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to update script (HTTP ${res.status})`)
     }
-    throw new Error('Script not found')
+    const data = await res.json()
+    return data.item as Script
+  } catch (error) {
+    console.error('Failed to update script via API', error)
+    throw error
   }
-
-  if (error) throw error
-  return data
 }
 
 // 图片相关操作
@@ -341,83 +272,83 @@ export async function createGeneratedImage(
   imageUrl: string,
   shotNumber?: number
 ): Promise<GeneratedImage> {
-  if (isDemoMode) {
-    const image: GeneratedImage = {
-      id: `demo_img_${Date.now()}`,
-      script_id: scriptId,
-      prompt,
-      image_url: imageUrl,
-      status: 'completed',
-      shot_number: shotNumber,
-      created_at: new Date().toISOString()
-    }
-    demoImages.unshift(image)
-    return image
-  }
-
-  const { data, error } = await supabase
-    .from('generated_images')
-    .insert({
-      script_id: scriptId,
-      prompt,
-      image_url: imageUrl,
-      status: 'completed',
-      shot_number: shotNumber,
-      created_at: new Date().toISOString()
+  // 改为始终尝试通过服务端 API 写入 MongoDB，失败时回退到本地 demo 存储
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/generated-images`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ script_id: scriptId, prompt, image_url: imageUrl, shot_number: shotNumber, status: 'completed' })
     })
-    .select()
-    .single()
-
-  // Fallback to demo storage if table missing
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.generated_images' missing; using local demo storage.")
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to add generated image (HTTP ${res.status})`)
+    }
+    const data = await res.json()
+    return data.item as GeneratedImage
+  } catch (error) {
+    console.error('Failed to add generated image via API, falling back to local demo storage', error)
     const image: GeneratedImage = {
       id: `demo_img_${Date.now()}`,
       script_id: scriptId,
       prompt,
       image_url: imageUrl,
       status: 'completed',
+      shot_number: shotNumber,
       created_at: new Date().toISOString()
     }
     demoImages.unshift(image)
     return image
   }
-
-  if (error) throw error
-  return data
 }
 
 export async function getGeneratedImages(scriptId: string): Promise<GeneratedImage[]> {
-  if (isDemoMode) {
+  // 始终优先从服务端 API 读取，失败时回退到本地 demo 数据
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const params = new URLSearchParams({ script_id: scriptId })
+    const res = await fetch(`${baseOrigin}/api/generated-images?${params.toString()}`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.error('API:get generated_images failed', err)
+      return demoImages.filter(img => img.script_id === scriptId)
+    }
+    const data = await res.json()
+    const items = (data.items as GeneratedImage[]) || []
+    return items
+  } catch (error) {
+    console.error('Failed to load generated images via API, falling back to local demo data', error)
     return demoImages.filter(img => img.script_id === scriptId)
   }
+}
 
-  const { data, error } = await supabase
-    .from('generated_images')
-    .select('*')
-    .eq('script_id', scriptId)
-    .order('shot_number', { ascending: true, nullsFirst: false })
-    .order('created_at', { ascending: true })
-
-  // Fallback to demo storage if table missing
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.generated_images' missing; using local demo storage.")
-    return demoImages.filter(img => img.script_id === scriptId)
+export async function updateGeneratedImage(
+  id: string,
+  updates: { shotNumber?: number }
+): Promise<GeneratedImage> {
+  // 优先通过服务端 API 更新，失败时回退到本地 demo 数据
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/generated-images`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, shot_number: updates.shotNumber })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to update generated image (HTTP ${res.status})`)
+    }
+    const data = await res.json()
+    return data.item as GeneratedImage
+  } catch (error) {
+    console.error('Failed to update generated image via API, falling back to local demo storage', error)
+    const target = demoImages.find(img => img.id === id)
+    if (!target) throw error
+    const updated: GeneratedImage = { ...target, shot_number: updates.shotNumber ?? target.shot_number }
+    const idx = demoImages.findIndex(img => img.id === id)
+    if (idx >= 0) demoImages[idx] = updated
+    return updated
   }
-
-  // Column missing fallback: Supabase returns 42703 when 'shot_number' column isn't yet migrated
-  if (error?.code === '42703') {
-    const { data: data2, error: err2 } = await supabase
-      .from('generated_images')
-      .select('*')
-      .eq('script_id', scriptId)
-      .order('created_at', { ascending: true })
-    if (err2) throw err2
-    return data2 || []
-  }
-
-  if (error) throw error
-  return data || []
 }
 // 参考图相关操作
 // Local cache helpers for reference images (client-side, TTL-based)
@@ -542,28 +473,22 @@ export async function removeReferenceImage(id: string): Promise<void> {
     return
   }
 
-  // 服务端 API 删除（可后续扩展）：当前可直接从 Supabase 删除，也可实现 /api/reference-images/[id] DELETE
+  // 改为调用服务端 API，经由 MongoDB 统一删除
   try {
-    // 暂时按直接 Supabase 删除的旧逻辑保留，若 RLS 阻断可再改为服务端 DELETE 路由
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-    if (!supabaseUrl || !serviceRoleKey) {
-      console.warn('Supabase 未配置，无法删除参考图')
-      return
-    }
-    const { createClient } = await import('@supabase/supabase-js')
-    const svc = createClient(supabaseUrl, serviceRoleKey)
-    const { error } = await svc
-      .from('reference_images')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', user.id)
-    if (error) {
-      console.error('Service role delete reference_images error', error)
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-images`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, user_id: user.id })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to delete reference image (HTTP ${res.status})`)
     }
     invalidateRefCaches(user.id)
   } catch (error) {
-    console.error('Failed to delete reference image via service role', error)
+    console.error('Failed to delete reference image via API', error)
+    throw error
   }
 }
 
@@ -666,10 +591,10 @@ export async function saveApiKeySettings(settings: Partial<ApiKeySettings>): Pro
 export async function createGeneratedVideo(
   imageUrl: string,
   prompt: string,
-  scriptId: string | null = null,
+  scriptId?: string | null,
   shotNumber?: number,
-  status: GeneratedVideo['status'] = 'pending',
-  videoUrl = ''
+  status: string = 'pending',
+  videoUrl?: string
 ): Promise<GeneratedVideo> {
   const user = getCurrentUser()
 
@@ -680,7 +605,7 @@ export async function createGeneratedVideo(
       script_id: scriptId,
       image_url: imageUrl,
       prompt,
-      video_url: videoUrl,
+      video_url: typeof videoUrl === 'string' ? videoUrl : '',
       status,
       shot_number: shotNumber,
       created_at: new Date().toISOString()
@@ -689,39 +614,36 @@ export async function createGeneratedVideo(
     return video
   }
 
-  const { data, error } = await supabase
-    .from('generated_videos')
-    .insert({
-      user_id: user.id,
-      script_id: scriptId,
-      image_url: imageUrl,
-      prompt,
-      video_url: videoUrl,
-      status,
-      shot_number: shotNumber,
-      created_at: new Date().toISOString()
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/generated-videos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_url: imageUrl, prompt, script_id: scriptId ?? null, shot_number: shotNumber, status, video_url: videoUrl })
     })
-    .select()
-    .single()
-
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.generated_videos' missing; using local demo storage.")
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to add generated video (HTTP ${res.status})`)
+    }
+    const data = await res.json()
+    return data.item as GeneratedVideo
+  } catch (error) {
+    console.error('Failed to add generated video via API, falling back to local demo storage', error)
+    const user = getCurrentUser()
     const video: GeneratedVideo = {
       id: `demo_video_${Date.now()}`,
       user_id: user.id,
-      script_id: scriptId,
+      script_id: typeof scriptId === 'string' ? scriptId : null,
       image_url: imageUrl,
       prompt,
-      video_url: videoUrl,
+      video_url: typeof videoUrl === 'string' ? videoUrl : '',
       status,
+      shot_number: shotNumber,
       created_at: new Date().toISOString()
     }
     demoVideos.unshift(video)
     return video
   }
-
-  if (error) throw error
-  return data as GeneratedVideo
 }
 
 export async function updateGeneratedVideoStatus(
@@ -738,28 +660,23 @@ export async function updateGeneratedVideoStatus(
     return demoVideos[index]
   }
 
-  const { data, error } = await supabase
-    .from('generated_videos')
-    .update({
-      ...updates
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/generated-videos`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, ...updates })
     })
-    .eq('id', id)
-    .select()
-    .single()
-
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.generated_videos' missing; using local demo storage.")
-    const index = demoVideos.findIndex(video => video.id === id)
-    if (index === -1) throw new Error('Video not found')
-    demoVideos[index] = {
-      ...demoVideos[index],
-      ...updates
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to update generated video (HTTP ${res.status})`)
     }
-    return demoVideos[index]
+    const data = await res.json()
+    return data.item as GeneratedVideo
+  } catch (error) {
+    console.error('Failed to update generated video via API', error)
+    throw error
   }
-
-  if (error) throw error
-  return data as GeneratedVideo
 }
 
 export async function getGeneratedVideos(scriptId?: string): Promise<GeneratedVideo[]> {
@@ -770,42 +687,27 @@ export async function getGeneratedVideos(scriptId?: string): Promise<GeneratedVi
     return scriptId ? videos.filter(video => video.script_id === scriptId) : videos
   }
 
-  let query = supabase
-    .from('generated_videos')
-    .select('*')
-    .eq('user_id', user.id)
-    .order('shot_number', { ascending: true, nullsFirst: false })
-    .order('created_at', { ascending: true })
-
-  if (scriptId) {
-    query = query.eq('script_id', scriptId)
-  }
-
-  const { data, error } = await query
-
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.generated_videos' missing; using local demo storage.")
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const params = new URLSearchParams()
+    if (scriptId) params.set('script_id', scriptId)
+    const url = `${baseOrigin}/api/generated-videos${params.size ? `?${params.toString()}` : ''}`
+    const res = await fetch(url)
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.error('API:get generated_videos failed', err)
+      const user = getCurrentUser()
+      const videos = demoVideos.filter(video => video.user_id === user.id)
+      return scriptId ? videos.filter(video => video.script_id === scriptId) : videos
+    }
+    const data = await res.json()
+    return (data.items as GeneratedVideo[]) || []
+  } catch (error) {
+    console.error('Failed to load generated videos via API', error)
+    const user = getCurrentUser()
     const videos = demoVideos.filter(video => video.user_id === user.id)
     return scriptId ? videos.filter(video => video.script_id === scriptId) : videos
   }
-
-  // Column missing fallback: Supabase returns 42703 when 'shot_number' column isn't yet migrated
-  if (error?.code === '42703') {
-    let query2 = supabase
-      .from('generated_videos')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: true })
-    if (scriptId) {
-      query2 = query2.eq('script_id', scriptId)
-    }
-    const { data: data2, error: err2 } = await query2
-    if (err2) throw err2
-    return data2 || []
-  }
-
-  if (error) throw error
-  return data || []
 }
 
 export async function updateProjectName(projectId: string, name: string): Promise<Project> {
@@ -820,26 +722,23 @@ export async function updateProjectName(projectId: string, name: string): Promis
     throw new Error('Project not found')
   }
 
-  const { data, error } = await supabase
-    .from('projects')
-    .update({ name })
-    .eq('id', projectId)
-    .eq('user_id', user.id)
-    .select()
-    .single()
-
-  if (error?.code === 'PGRST205') {
-    console.warn("Supabase table 'public.projects' missing; using local demo storage.")
-    const idx = demoProjects.findIndex(p => p.id === projectId && p.user_id === user.id)
-    if (idx !== -1) {
-      demoProjects[idx].name = name
-      return demoProjects[idx]
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/projects`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: projectId, name })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to update project name (HTTP ${res.status})`)
     }
-    throw new Error('Project not found')
+    const data = await res.json()
+    return data.item as Project
+  } catch (error) {
+    console.error('Failed to update project via API', error)
+    throw error
   }
-
-  if (error) throw error
-  return data as Project
 }
 
 export async function updateReferenceImageLabel(id: string, label: string): Promise<ReferenceImage> {
@@ -871,6 +770,124 @@ export async function updateReferenceImageLabel(id: string, label: string): Prom
     return data.item as ReferenceImage
   } catch (error) {
     console.error('Failed to update reference image via API', error)
+    throw error
+  }
+}
+
+// 参考视频：新增/获取/删除/更新标签
+export async function addReferenceVideo(url: string, label?: string, scriptId?: string | null): Promise<ReferenceVideo> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    return {
+      id: `demo_ref_video_${Date.now()}`,
+      user_id: user.id,
+      url,
+      label,
+      script_id: scriptId ?? null,
+      created_at: new Date().toISOString()
+    }
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-videos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, label, user_id: user.id, script_id: scriptId ?? null })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to add reference video (HTTP ${res.status})`)
+    }
+    const data = await res.json()
+    return data.item as ReferenceVideo
+  } catch (error) {
+    console.error('Failed to add reference video via API', error)
+    throw error
+  }
+}
+
+export async function getReferenceVideos(limit = 10, before?: string, scriptId?: string): Promise<ReferenceVideo[]> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    return []
+  }
+
+  try {
+    const params = new URLSearchParams({ user_id: user.id, limit: String(limit) })
+    if (before) params.set('before', before)
+    if (scriptId) params.set('script_id', scriptId)
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-videos?${params.toString()}`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.error('API:get reference_videos failed', err)
+      return []
+    }
+    const data = await res.json()
+    const items = (data.items as ReferenceVideo[]) || []
+    return items
+  } catch (error) {
+    console.error('Failed to load reference videos via API', error)
+    return []
+  }
+}
+
+export async function removeReferenceVideo(id: string): Promise<void> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    return
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-videos`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, user_id: user.id })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to delete reference video (HTTP ${res.status})`)
+    }
+  } catch (error) {
+    console.error('Failed to delete reference video via API', error)
+    throw error
+  }
+}
+
+export async function updateReferenceVideoLabel(id: string, label: string): Promise<ReferenceVideo> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    return {
+      id,
+      user_id: user.id,
+      url: '',
+      label,
+      script_id: null,
+      created_at: new Date().toISOString()
+    }
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-videos`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, label, user_id: user.id })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to update reference video label (HTTP ${res.status})`)
+    }
+    const data = await res.json()
+    return data.item as ReferenceVideo
+  } catch (error) {
+    console.error('Failed to update reference video via API', error)
     throw error
   }
 }
