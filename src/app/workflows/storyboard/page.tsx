@@ -601,6 +601,11 @@ function extractActionText(segment: StoryboardSegment, imagePromptText?: string)
   return ''
 }
 
+// 清洗分镜文本前缀序号：移除类似“1. ”、“2、”、“3:” 的编号
+function stripLeadingOrder(text: string): string {
+  return String(text || '').replace(/^\s*\d+[\.、:：]\s*/, '').trim()
+}
+
 // 解析 CSV 中的分镜提示块（中文标签）为结构化 StoryboardPrompt
 function parsePromptBlock(block: string): StoryboardPrompt {
   const lines = block
@@ -702,20 +707,21 @@ export default function StoryboardWorkflowPage() {
   const [isSavingWorldview, setIsSavingWorldview] = useState(false)
   const [worldviewSavedInfo, setWorldviewSavedInfo] = useState('')
   // 世界观预设管理
-  const [worldviews, setWorldviews] = useState<string[]>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const saved = localStorage.getItem('storyboard_worldviews')
-        if (saved) {
-          const arr = JSON.parse(saved)
-          if (Array.isArray(arr) && arr.every(x => typeof x === 'string')) {
-            return arr as string[]
-          }
+  const DEFAULT_WORLDVIEWS = ['赛博朋克', '克苏鲁', '蒸汽朋克', '生物朋克']
+  const [worldviews, setWorldviews] = useState<string[]>(DEFAULT_WORLDVIEWS)
+  // 避免 SSR 与客户端初始渲染不一致：
+  // 将 localStorage 读取放到挂载后执行，确保首屏标记与内容一致，再进行客户端更新。
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('storyboard_worldviews')
+      if (saved) {
+        const arr = JSON.parse(saved)
+        if (Array.isArray(arr) && arr.every(x => typeof x === 'string')) {
+          setWorldviews(arr as string[])
         }
-      } catch { /* ignore */ }
-    }
-    return ['赛博朋克', '克苏鲁', '蒸汽朋克', '生物朋克']
-  })
+      }
+    } catch { /* ignore */ }
+  }, [])
   const [newWorldview, setNewWorldview] = useState('')
   const [editingKey, setEditingKey] = useState<string | null>(null)
   const [editingText, setEditingText] = useState('')
@@ -735,7 +741,7 @@ export default function StoryboardWorkflowPage() {
   const [imageProgress, setImageProgress] = useState(0)
   const [generatingShotIds, setGeneratingShotIds] = useState<Record<string, boolean>>({})
   // 右侧参考图悬浮面板折叠状态
-  const [isRefPanelOpen, setIsRefPanelOpen] = useState(false)
+  const [isRefPanelOpen, setIsRefPanelOpen] = useState(true)
   // 右侧“批量替换预览文本”悬浮面板折叠状态（默认折叠）
   const [isBulkPanelOpen, setIsBulkPanelOpen] = useState(false)
 
@@ -837,6 +843,8 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [useImageAsKeyframe, setUseImageAsKeyframe] = useState(true)
   const [isSubmittingVideo, setIsSubmittingVideo] = useState(false)
   const [isDownloadingImages, setIsDownloadingImages] = useState(false)
+  // 新增：Step 4 折叠隐藏开关
+  const [isStep4Collapsed, setIsStep4Collapsed] = useState(true)
   const [projectId, setProjectId] = useState<string | null>(null)
   const [scriptId, setScriptId] = useState<string | null>(null)
   // 历史项目/脚本选择相关状态
@@ -915,6 +923,27 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
   const [isAddingHistory, setIsAddingHistory] = useState(false)
   const [isUploadingHistory, setIsUploadingHistory] = useState(false)
 
+  // 初始化：从 URL 查询参数恢复当前项目，避免刷新后丢失 projectId
+  useEffect(() => {
+    const restoreByQuery = async () => {
+      try {
+        const pid = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('project') : null
+        if (!pid) return
+        setProjectId(pid)
+        setSelectedExistingProjectId(pid)
+        const projects = await getProjects()
+        setExistingProjects(projects)
+        const match = projects.find(p => p.id === pid)
+        if (match) {
+          setProjectName(match.name || 'Storyboard Project')
+        }
+      } catch (err) {
+        console.warn('Restore project by query failed', err)
+      }
+    }
+    restoreByQuery()
+  }, [])
+
   const handleCopy = useCallback(async (text: string) => {
     try {
       await navigator.clipboard.writeText(text)
@@ -982,12 +1011,22 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     const loadReferences = async () => {
       setIsLoadingRefs(true)
       try {
-        const items = await getReferenceImages(10)
-        setReferenceImages(items)
-        setSelectedReferenceIds(prev => prev.filter(id => items.some(item => item.id === id)))
-        const lastCreatedAt = items.length > 0 ? items[items.length - 1].created_at : null
-        setRefCursor(lastCreatedAt)
-        setRefHasMore(items.length === 10)
+        const limit = 50
+        const first = await getReferenceImages(limit)
+        let all = [...first]
+        let before = first.length ? first[first.length - 1].created_at : null
+        // 默认尽可能加载全部参考图（分批 50 条）
+        while (before && first.length === limit) {
+          const next = await getReferenceImages(limit, before)
+          if (!next.length) break
+          all = [...all, ...next]
+          before = next[next.length - 1].created_at
+          if (next.length < limit) break
+        }
+        setReferenceImages(all)
+        setSelectedReferenceIds(prev => prev.filter(id => all.some(item => item.id === id)))
+        setRefCursor(before)
+        setRefHasMore(false)
       } catch (error) {
         console.error('Failed to load reference images', error)
         setStatus({ type: 'error', text: 'Failed to load reference images.' })
@@ -1005,9 +1044,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         const projects = await getProjects()
         setExistingProjects(projects)
         // 若尚未选择项目且存在项目，默认选择第一个项目，后续将自动加载脚本与历史记录
-        if (!selectedExistingProjectId && projects.length > 0) {
-          setSelectedExistingProjectId(projects[0].id)
-        }
+        // 默认不自动选择项目，保持空选择，符合“首次进入不选中项目”的需求
       } catch (error) {
         console.error('Failed to load projects', error)
         setStatus({ type: 'error', text: '加载项目列表失败。' })
@@ -1291,8 +1328,28 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
   // 载入选中的历史脚本，将其内容映射为分镜进行继续编辑
   const handleLoadExistingScript = useCallback(async () => {
     try {
-      if (!selectedExistingProjectId || !selectedExistingScriptId) {
-        setStatus({ type: 'info', text: '请先选择项目与脚本。' })
+      if (!selectedExistingProjectId) {
+        setStatus({ type: 'info', text: '请先选择项目。' })
+        return
+      }
+      if (!selectedExistingScriptId) {
+        const project = existingProjects.find(p => p.id === selectedExistingProjectId) || null
+        if (project) {
+          setProjectName(project.name)
+        }
+        setProjectId(selectedExistingProjectId)
+        setScriptId('')
+        setSegments([])
+        setSelectedForImages([])
+        setSelectedForVideo([])
+        setImageResults({})
+        setVideoJobs({})
+        setVideoPromptOverrides({})
+        setRawJson('')
+        setParseError(null)
+        setAnalysis('')
+        setAnalysisId('')
+        setStatus({ type: 'info', text: '该项目暂无脚本，请粘贴原始脚本并点击“保存原始脚本”创建脚本。' })
         return
       }
       const project = existingProjects.find(p => p.id === selectedExistingProjectId) || null
@@ -1428,6 +1485,28 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           }
         })
         setVideoJobs(nextVideoJobs)
+
+        // 回填保存的 Video Prompt（MongoDB）用于覆盖 Step 4 文本
+        try {
+          if (selectedExistingScriptId) {
+            const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+            const res = await fetch(`${baseOrigin}/api/video-prompts?script_id=${encodeURIComponent(selectedExistingScriptId)}`)
+            if (res.ok) {
+              const data = await res.json().catch(() => ({}))
+              const items: Array<{ shot_number?: number; text?: string }> = data?.items || []
+              const nextOverrides: Record<string, string> = { ...videoPromptOverrides }
+              items.forEach(item => {
+                if (typeof item.shot_number === 'number' && typeof item.text === 'string') {
+                  const seg = byShot.get(item.shot_number)
+                  if (seg) nextOverrides[seg.id] = item.text
+                }
+              })
+              setVideoPromptOverrides(nextOverrides)
+            }
+          }
+        } catch (e) {
+          console.error('读取保存的 Video Prompt 失败', e)
+        }
 
         // 统计未映射的历史记录数量，并缓存全部历史用于展示
         const unmatchedImages = images.filter(img => {
@@ -1935,8 +2014,18 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     setVideoPromptOverrides(nextOverrides)
     setStatus({ type: 'success', text: `已对 ${targets.length} 个镜头的 Video prompt 执行批量替换。` })
   }, [segments, selectedForVideo, imageResults, videoPromptOverrides, videoBulkFind, videoBulkReplace])
-   const handleBulkDownloadImages = useCallback(async () => {
-    const slug = projectSlug || 'storyboard'
+  const handleBulkDownloadImages = useCallback(async () => {
+    // 提示词文本是否已生成
+    const promptText = (promptCsv || '').trim()
+    if (!promptText) {
+      setStatus({ type: 'info', text: '请先生成“Gemini：生成视频分镜提示词（文本）”。' })
+      try {
+        const el = document.getElementById('gemini-prompt-text')
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      } catch {}
+      return
+    }
+
     const items = segments
       .map(s => ({ s, img: imageResults[s.id] }))
       .filter(item => Boolean(item.img))
@@ -1948,42 +2037,39 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
 
     setIsDownloadingImages(true)
     try {
-      const payload = {
-        projectSlug: slug,
-        items: items.map(({ s, img }) => {
-          const customPrompt = videoPromptOverrides[s.id]?.trim()
-          const actionOnly = extractActionText(s, img?.prompt)
-          const promptForVideo = customPrompt && customPrompt.length > 0
-            ? customPrompt
-            : (actionOnly || img?.prompt || formatPromptForModel(s))
-          return {
-            shotNumber: s.shotNumber,
-            prompt: promptForVideo,
-            imageUrl: img?.url
-          }
-        })
-      }
+      // 并发下载，文件名按分镜号命名：shot_1.png / shot_2.jpeg ...
+      await Promise.all(items.map(async ({ s, img }) => {
+        const url = String(img?.url || '')
+        let ext = 'png'
+        try {
+          const pathname = new URL(url).pathname
+          const m = pathname.match(/\.([a-zA-Z0-9]+)$/)
+          if (m && m[1]) ext = m[1].toLowerCase()
+        } catch {}
+        const filename = `shot_${s.shotNumber}.${ext}`
+        await downloadImage(url, filename)
+      }))
 
-      const resp = await fetch('/api/bulk-save-images', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
+      // 下载 prompt.txt（移除每行前缀序号）
+      const sanitized = promptText.split(/\r?\n/).map(l => stripLeadingOrder(l)).join('\n')
+      const blob = new Blob([sanitized], { type: 'text/plain;charset=utf-8' })
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = 'prompt.txt'
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(objectUrl)
 
-      if (!resp.ok) {
-        const text = await resp.text()
-        throw new Error(`Bulk save failed: ${resp.status} ${text}`)
-      }
-
-      const data = await resp.json()
-      setStatus({ type: 'success', text: `Saved ${data.saved} images to ${data.project_dir}. Task: ${data.task_file}` })
+      setStatus({ type: 'success', text: `已开始下载 ${items.length} 张图片和 prompt.txt` })
     } catch (e) {
-      console.error('Bulk save images failed', e)
-      setStatus({ type: 'error', text: 'Bulk save images failed.' })
+      console.error('Bulk download images failed', e)
+      setStatus({ type: 'error', text: '下载图片失败，请稍后重试。' })
     } finally {
       setIsDownloadingImages(false)
     }
-  }, [segments, imageResults, projectSlug, videoPromptOverrides])
+  }, [segments, imageResults, promptCsv, downloadImage])
 
   const selectableSegments = useMemo(
     () =>
@@ -2021,7 +2107,8 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               type="text"
               value={projectName}
               onChange={event => setProjectName(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500"
+              disabled={!projectId}
               placeholder="Storyboard Project"
             />
           </label>
@@ -2056,25 +2143,8 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           </button>
           <button
             type="button"
-            onClick={async () => {
-              try {
-                const name = (projectName || 'Storyboard Project').trim()
-                const project = await createProject(name, 'Storyboard created via header')
-                setProjectId(project.id)
-                const projects = await getProjects()
-                setExistingProjects(projects)
-                setStatus({ type: 'success', text: `项目已创建：${project.name}` })
-              } catch (e) {
-                console.error('Create project failed', e)
-                setStatus({ type: 'error', text: '新建项目失败。' })
-              }
-            }}
-            className="mt-6 h-10 rounded-md bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700"
-            aria-label="新增项目"
-            title="在当前名称下创建一个新项目"
-          >
-            新增项目
-          </button>
+            style={{ display: 'none' }}
+          />
           <p className="text-xs text-gray-500">
             The project name is used when downloading images and preparing Veo prompts.
           </p>
@@ -2095,12 +2165,34 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             <select
               value={selectedExistingProjectId}
               onChange={e => {
-                setSelectedExistingProjectId(e.target.value)
+                const val = e.target.value
+                if (val === '__new__') {
+                  ;(async () => {
+                    try {
+                      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                      const defaultName = `Storyboard Project ${stamp}`
+                      const project = await createProject(defaultName, 'Storyboard created via selector')
+                      setProjectId(project.id)
+                      setProjectName(project.name)
+                      setSelectedExistingProjectId(project.id)
+                      setStatus({ type: 'success', text: `项目已创建：${project.name}` })
+                      if (typeof window !== 'undefined') {
+                        window.location.href = `/workflows/storyboard?project=${project.id}`
+                      }
+                    } catch (e) {
+                      console.error('Create project from selector failed', e)
+                      setStatus({ type: 'error', text: '新建项目失败。' })
+                    }
+                  })()
+                  return
+                }
+                setSelectedExistingProjectId(val)
                 setSelectedExistingScriptId('')
               }}
               className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="">选择一个项目</option>
+              <option value="__new__" style={{ color: '#16a34a', fontWeight: '600' }}>🟩 新建项目</option>
               {existingProjects.map(p => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
@@ -2111,7 +2203,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             <select
               value={selectedExistingScriptId}
               onChange={e => setSelectedExistingScriptId(e.target.value)}
-              disabled={!selectedExistingProjectId || existingScripts.length === 0}
+              disabled={!selectedExistingProjectId}
               className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-400"
             >
               <option value="">{selectedExistingProjectId ? '选择一个脚本' : '请先选择项目'}</option>
@@ -2126,7 +2218,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             <button
               type="button"
               onClick={handleLoadExistingScript}
-              disabled={!selectedExistingProjectId || !selectedExistingScriptId}
+              disabled={!selectedExistingProjectId}
               className="h-10 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-gray-300 disabled:text-gray-600"
             >
               加载并继续编辑
@@ -2137,15 +2229,6 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                 if (!selectedExistingProjectId) return
                 let ok = typeof window !== 'undefined' ? window.confirm('确认删除该项目及其所有脚本与生成内容？此操作不可恢复。') : false
                 if (!ok) return
-                let confirmName = ''
-                if (typeof window !== 'undefined') {
-                  confirmName = window.prompt(`为防止误删，请输入项目名称以确认：\n${(existingProjects.find(p => p.id === selectedExistingProjectId)?.name) || ''}`) || ''
-                }
-                const expected = (existingProjects.find(p => p.id === selectedExistingProjectId)?.name || '').trim()
-                if (!expected || confirmName.trim() !== expected) {
-                  setStatus({ type: 'info', text: '项目名称不匹配，已取消删除。' })
-                  return
-                }
                 setIsDeletingProject(true)
                 try {
                   await deleteProject(selectedExistingProjectId)
@@ -2178,7 +2261,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
 
       {/* 右侧悬浮参考图折叠面板 */}
       {referenceImages.length > 0 && (
-        <div className="fixed right-4 top-[calc(50%-220px)] z-50 hidden w-72 md:block">
+        <div className={`fixed right-4 top-[calc(50%-220px)] z-50 hidden md:block ${isRefPanelOpen ? 'w-[28rem]' : 'w-72'}`}>
           {/* 参考图折叠面板 */}
           <div className="rounded-lg border border-gray-200 bg-white/95 shadow">
             <button
@@ -2192,7 +2275,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             </button>
             {isRefPanelOpen && (
               <div className="px-3 pb-3">
-                <div className="flex flex-wrap gap-2 max-h-72 overflow-y-auto overflow-x-hidden pr-1">
+                <div className="flex flex-wrap gap-2 max-h-[420px] overflow-y-auto overflow-x-hidden pr-1">
                   {referenceImages.map((image) => {
                     const isSelected = selectedReferenceIds.includes(image.id)
                     const orderedIndex = isSelected ? selectedReferenceIds.findIndex(id => id === image.id) + 1 : null
@@ -2340,7 +2423,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             )}
           </div>
           {/* 独立悬浮的批量生成按钮：位于“Bulk replace”按钮下方，不在其内容内 */}
-          <div className="mt-2 flex items-center justify-end">
+          <div className="mt-2 flex flex-col items-end gap-2">
             <button
               type="button"
               onClick={handleGenerateImages}
@@ -2349,16 +2432,25 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             >
               {isGeneratingImages ? `Generating ${imageProgress}%` : 'Generate images'}
             </button>
+            <button
+              type="button"
+              onClick={handleBulkDownloadImages}
+              disabled={isDownloadingImages || Object.keys(imageResults).length === 0}
+              className="ml-2 rounded-md bg-blue-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              title="下载已生成的图片（按分镜号命名）"
+            >
+              {isDownloadingImages ? 'Downloading...' : `Download images (${Object.keys(imageResults).length})`}
+            </button>
           </div>
         </div>
       )}
 
-      {/* Floating right-side step tabs */}
-      <nav className="fixed right-4 top-1/2 z-40 hidden -translate-y-1/2 flex-col space-y-2 md:flex">
-        <a href="#step-1" className="rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 1 解析提示词</a>
-        <a href="#step-2" className="rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 2 参考图 | 分镜图</a>
-        <a href="#step-3" className="rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 3 设置图片</a>
-        <a href="#step-4" className="rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 4 生成视频</a>
+      {/* Floating right-side step tabs（下移以避免与右侧按钮重叠） */}
+      <nav className="fixed right-4 top-[calc(50%+140px)] z-40 hidden md:flex md:w-40 md:flex-col md:space-y-2">
+        <a href="#step-1" className="block w-full rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 1 解析提示词</a>
+        <a href="#step-2" className="block w-full rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 2 参考图 | 分镜图</a>
+        <a href="#step-3" className="block w-full rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 3 设置图片</a>
+        <a href="#step-4" className="block w-full rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 4 生成视频</a>
       </nav>
 
       {status && (
@@ -2442,12 +2534,60 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                     setting: s.prompt?.environment || '',
                     mood: s.prompt?.time_of_day || ''
                   }))
-                  if (!projectId) {
-                    setStatus({ type: 'info', text: '请先点击“新增项目”。' })
-                    return
+                  // 若尚未创建项目，则自动创建一个默认项目并继续保存脚本
+                  let ensuredProjectId = projectId
+                  // 校验当前 projectId 是否真实存在于数据库；若不存在则创建默认项目
+                  try {
+                    const projects = await getProjects()
+                    const exists = ensuredProjectId ? projects.some(p => p.id === ensuredProjectId) : false
+                    if (!exists) {
+                      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                      const defaultName = `Storyboard Project ${stamp}`
+                      const newProject = await createProject(defaultName, 'Auto-created when saving original script')
+                      ensuredProjectId = newProject.id
+                      setProjectId(newProject.id)
+                      setProjectName(newProject.name)
+                      setSelectedExistingProjectId(newProject.id)
+                      const refreshed = await getProjects()
+                      setExistingProjects(refreshed)
+                      setStatus({ type: 'success', text: `已自动创建项目：${newProject.name}` })
+                    }
+                  } catch (verifyErr) {
+                    console.warn('校验项目存在性失败，将尝试创建默认项目以继续保存。', verifyErr)
+                    if (!ensuredProjectId) {
+                      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                      const defaultName = `Storyboard Project ${stamp}`
+                      const fallbackProject = await createProject(defaultName, 'Auto-created when saving original script')
+                      ensuredProjectId = fallbackProject.id
+                      setProjectId(fallbackProject.id)
+                      setProjectName(fallbackProject.name)
+                      setSelectedExistingProjectId(fallbackProject.id)
+                      const refreshed = await getProjects().catch(() => [])
+                      if (Array.isArray(refreshed)) setExistingProjects(refreshed)
+                      setStatus({ type: 'success', text: `已自动创建项目：${fallbackProject.name}` })
+                    }
                   }
                   if (!scriptId) {
-                    const script = await createScript(projectId, segmentsMapped, rawJson)
+                    let script
+                    try {
+                      script = await createScript(ensuredProjectId, segmentsMapped, rawJson)
+                    } catch (err: any) {
+                      const msg = String(err?.message || '')
+                      if (msg.includes('Invalid project_id')) {
+                        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                        const defaultName = `Storyboard Project ${stamp}`
+                        const newProject = await createProject(defaultName, 'Auto-created on retry when saving original script')
+                        ensuredProjectId = newProject.id
+                        setProjectId(newProject.id)
+                        setProjectName(newProject.name)
+                        setSelectedExistingProjectId(newProject.id)
+                        const refreshed = await getProjects()
+                        setExistingProjects(refreshed)
+                        script = await createScript(ensuredProjectId, segmentsMapped, rawJson)
+                      } else {
+                        throw err
+                      }
+                    }
                     setScriptId(script.id)
                     setStatus({ type: 'success', text: '脚本已创建并保存原始脚本与分镜。' })
                     return
@@ -2647,7 +2787,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         </div>
 
         {/* Gemini: 生成视频分镜提示词（文本） */}
-        <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 p-4">
+        <div id="gemini-prompt-text" className="mt-4 rounded-md border border-blue-200 bg-blue-50 p-4">
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-gray-800">Gemini：生成视频分镜提示词（文本）</h3>
             <div className="flex items-center gap-2">
@@ -2692,11 +2832,49 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               <button
                 type="button"
                 className="rounded border border-green-300 px-2 py-1 text-[11px] text-green-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
-                onClick={() => promptCsv && setRawJson(promptCsv)}
+                onClick={async () => {
+                  if (!promptCsv) return
+                  const lines = promptCsv.split(/\r?\n/).map(l => stripLeadingOrder(l.trim())).filter(Boolean)
+                  if (!segments.length) {
+                    setStatus({ type: 'info', text: '请先在 Step 1 解析分镜脚本。' })
+                    return
+                  }
+                  const nextOverrides: Record<string, string> = { ...videoPromptOverrides }
+                  const promptsPayload: Array<{ shot_number: number; text: string }> = []
+                  segments.forEach((seg, i) => {
+                    const idx = typeof seg.shotNumber === 'number' ? seg.shotNumber - 1 : i
+                    const text = lines[idx] || ''
+                    if (text) {
+                      nextOverrides[seg.id] = text
+                      if (scriptId) {
+                        promptsPayload.push({ shot_number: seg.shotNumber || i + 1, text })
+                      }
+                    }
+                  })
+                  setVideoPromptOverrides(nextOverrides)
+                  setStatus({ type: 'success', text: `已覆盖 Step 4 的 Video Prompt（${promptsPayload.length} 条）。` })
+                  // 保存到 MongoDB
+                  try {
+                    if (scriptId && promptsPayload.length) {
+                      const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+                      const res = await fetch(`${baseOrigin}/api/video-prompts`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ script_id: scriptId, prompts: promptsPayload })
+                      })
+                      if (!res.ok) {
+                        const err = await res.json().catch(() => null)
+                        console.error('保存 Video Prompt 失败', err)
+                      }
+                    }
+                  } catch (e) {
+                    console.error('保存 Video Prompt 异常', e)
+                  }
+                }}
                 disabled={!promptCsv}
-                title="将生成的文本覆盖到原始脚本文本框"
+                title="将生成的文本覆盖到 Step 4 的 Video Prompt"
               >
-                覆盖到原始脚本
+                覆盖到 Step 4 的 Video Prompt
               </button>
               <button
                 type="button"
@@ -3498,7 +3676,8 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                       <img
                         src={imageRecord.url}
                         alt={`Shot ${segment.shotNumber}`}
-                        className="max-h-56 w-full object-contain"
+                        className="max-h-56 w-full object-contain cursor-zoom-in"
+                        onClick={() => setImagePreview({ url: imageRecord.url, alt: `Shot ${segment.shotNumber}` })}
                       />
                     </div>
                     <p className="text-[11px] text-gray-500">Doubao prompt: {imageRecord.prompt}</p>
@@ -3831,6 +4010,15 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             >
               {isGeneratingImages ? `Generating ${imageProgress}%` : 'Generate images'}
             </button>
+            <button
+              type="button"
+              onClick={handleBulkDownloadImages}
+              disabled={isDownloadingImages || Object.keys(imageResults).length === 0}
+              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              title="下载已生成的图片（按分镜号命名）"
+            >
+              {isDownloadingImages ? 'Downloading...' : `Download images (${Object.keys(imageResults).length})`}
+            </button>
           </div>
         </div>
 
@@ -3841,8 +4029,17 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           <div>
             <h2 id="step-4" className="text-lg font-semibold text-gray-900">Step 4 - Submit Veo3 videos</h2>
             <p className="text-sm text-gray-500">Select the shots you want to convert to video. Unselected images will be downloaded using the project name.</p>
+            <button
+              type="button"
+              className="mt-2 rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+              onClick={() => setIsStep4Collapsed(v => !v)}
+              aria-expanded={!isStep4Collapsed}
+              title={isStep4Collapsed ? '展开' : '收起'}
+            >
+              {isStep4Collapsed ? '展开' : '收起'}
+            </button>
           </div>
-          <div className="flex flex-wrap items-center gap-3 text-sm text-gray-600">
+          <div className={`flex flex-wrap items-center gap-3 text-sm text-gray-600 ${isStep4Collapsed ? 'hidden' : ''}`}>
             <label>
               Model
               <select
@@ -3902,19 +4099,11 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             >
               {isSubmittingVideo ? 'Submitting...' : `Submit Veo3 (${selectedForVideo.length})`}
             </button>
-            <button
-              type="button"
-              onClick={handleBulkDownloadImages}
-              disabled={isDownloadingImages || Object.keys(imageResults).length === 0}
-              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isDownloadingImages ? 'Downloading...' : `Download images (${Object.keys(imageResults).length})`}
-            </button>
           </div>
         </div>
 
         {/* 新增：Veo3 区域的批量替换控件 */}
-         <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
+         <div className={`mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4 ${isStep4Collapsed ? 'hidden' : ''}`}>
            <div className="flex flex-col gap-3 md:flex-row md:items-end md:gap-4">
              <label className="text-sm text-gray-700">
                查找
@@ -3956,12 +4145,14 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
              </div>
            </div>
          </div>
-         <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+         <div className={`mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3 ${isStep4Collapsed ? 'hidden' : ''}`}>
            {segments.map(segment => {
             const image = imageResults[segment.id]
             const job = videoJobs[segment.id]
-            const actionPrompt = extractActionText(segment, image?.prompt)
-            const promptFallback = actionPrompt || image?.prompt || formatPromptForModel(segment)
+            const geminiText = (segment.promptText || '').trim()
+            const actionOnly = extractActionText(segment, image?.prompt)
+            const actionLabel = actionOnly ? `动作：${actionOnly}` : ''
+            const promptFallback = geminiText || actionLabel || image?.prompt || formatPromptForModel(segment)
             const promptValue = videoPromptOverrides[segment.id] ?? promptFallback
             const isSelected = selectedForVideo.includes(segment.id)
             const checkboxDisabled = !image
@@ -3989,29 +4180,6 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                         className="max-h-64 w-full cursor-zoom-in object-contain"
                         onClick={() => setImagePreview({ url: image.url, alt: `Shot ${segment.shotNumber}` })}
                       />
-                      <button
-                        type="button"
-                        className="absolute bottom-2 right-2 rounded-full bg-black/60 p-2 text-white shadow hover:bg-black/70"
-                        onClick={(e) => { e.stopPropagation(); setImagePreview({ url: image.url, alt: `Shot ${segment.shotNumber}` }) }}
-                        aria-label="放大预览"
-                        title="放大预览"
-                      >
-                        🔍
-                      </button>
-                      <button
-                        type="button"
-                        className="absolute bottom-2 left-2 rounded-full bg-black/60 p-2 text-white shadow hover:bg-black/70"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          const ext = extractFileExtension(image.url) || 'jpg'
-                          const name = `${projectSlug || 'storyboard'}-shot-${segment.shotNumber}.${ext}`
-                          downloadImage(image.url, name)
-                        }}
-                        aria-label="下载图片"
-                        title="下载图片"
-                      >
-                        ⬇️
-                      </button>
                     </>
                     ) : (
                     <span className="text-xs text-gray-500">Generate a Doubao image first.</span>
@@ -4034,60 +4202,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                   <p className="text-[11px] text-gray-500">Doubao prompt: {image.prompt}</p>
                 )}
 
-                {/* 新增：打开 Doubao 的按钮，携带当前 Shot 的图片与提示词 */}
-                <div className="mt-2 space-y-2">
-                  <button
-                    type="button"
-                    className="rounded-md bg-orange-600 px-3 py-1 text-xs font-medium text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={!image}
-                    onClick={async () => {
-                      if (!image) return
-                      // 1) 将分镜图片写入系统剪贴板（Blob），便于到豆包后按 Ctrl+V 粘贴
-                      try {
-                        const res = await fetch(image.url, { mode: 'cors' })
-                        const blob = await res.blob()
-                        await navigator.clipboard.write([
-                          new ClipboardItem({ [blob.type]: blob })
-                        ])
-                        console.log('Copied storyboard image blob to clipboard')
-                      } catch (err) {
-                        console.warn('Failed to copy image blob to clipboard, falling back to URL text', err)
-                        try {
-                          await navigator.clipboard.writeText(image.url)
-                          console.log('Copied image URL to clipboard as fallback')
-                        } catch (err2) {
-                          console.warn('Clipboard writeText failed', err2)
-                        }
-                      }
-
-                      // 2) 组织提示词并打开豆包，扩展负责输入 / 激活视频生成与粘贴提示词
-                      const actionPrompt = extractActionText(segment, image?.prompt)
-                      const promptFallback = actionPrompt || image?.prompt || formatPromptForModel(segment)
-                      const pv = videoPromptOverrides[segment.id] ?? promptFallback
-                      const payload = {
-                        source: 'creative-workbench',
-                        shotId: segment.id,
-                        shotNumber: segment.shotNumber,
-                        imageUrl: image.url,
-                        prompt: pv,
-                        semiAuto: true
-                      }
-                      const encoded = encodeURIComponent(
-                        btoa(
-                          Array.from(new TextEncoder().encode(JSON.stringify(payload)))
-                            .map(b => String.fromCharCode(b))
-                            .join('')
-                        )
-                      )
-                      const targetUrl = `https://www.doubao.com/?cw=${encoded}`
-                      window.open(targetUrl, '_blank', 'noopener')
-                    }}
-                    title="打开 Doubao 并由浏览器扩展自动提交视频生成（需安装扩展）"
-                  >
-                    Doubao video
-                  </button>
-
-                </div>
+                {/* 已移除：豆包视频按钮与图片操作按钮；保留点击图片预览 */}
 
                 {/* Veo3 任务状态与视频播放 */}
                 {job && (
@@ -4185,3 +4300,4 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     </div>
   )
 }
+// （已修复）此前误将 hook 放在组件外部导致错误，现已移除

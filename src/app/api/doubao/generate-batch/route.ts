@@ -83,49 +83,66 @@ export async function POST(req: Request) {
       imagesColl = db.collection('generated_images')
     }
 
-    const results = []
-    for (let index = 0; index < payload.requests.length; index += 1) {
-      const request = payload.requests[index]
-      if (!request?.prompt) {
-        results.push({
-          url: 'https://via.placeholder.com/1024x1024?text=Invalid+Prompt',
-          prompt: 'Invalid prompt payload',
-          referenceImageUrl: request?.referenceImageUrl
-        })
-        continue
-      }
-
-      const image = await generateImage({
-        prompt: request.prompt,
-        referenceImageUrl: request.referenceImageUrl,
-        referenceImageUrls: request.referenceImageUrls,
-        size: request.size || defaultSize,
-        responseFormat: defaultFormat
-      })
-      results.push(image)
-
-      // 持久化到 MongoDB（可选）
-      if (imagesColl && scriptId) {
-        try {
-          // 某些环境对 generated_images 建立了 unique 索引 id_1，
-          // 若未显式设置 id 将以 null 写入并在第二条开始触发 E11000。
-          // 这里为每条插入生成唯一 id，避免索引冲突。
-          const uniqueId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-            ? crypto.randomUUID()
-            : `${scriptId}-${Date.now()}-${index}`
-          await imagesColl.insertOne({
-            id: uniqueId,
-            script_id: scriptId,
-            prompt: image.prompt || request.prompt,
-            image_url: image.url,
-            shot_number: request.shot_number,
-            status: 'completed',
-            created_at: nowIso
-          })
-        } catch (persistErr) {
-          console.error('Failed to persist generated image', persistErr)
+    // 并发优化：按批次并发生成，减少整体等待时间
+    const results: any[] = new Array(payload.requests.length)
+    const concurrency = Math.max(1, Math.min(8, Number(process.env.DOUBAO_CONCURRENCY || 4)))
+    for (let start = 0; start < payload.requests.length; start += concurrency) {
+      const slice = payload.requests.slice(start, start + concurrency)
+      const tasks = slice.map((request, offset) => (async () => {
+        const index = start + offset
+        if (!request?.prompt) {
+          return {
+            url: 'https://via.placeholder.com/1024x1024?text=Invalid+Prompt',
+            prompt: 'Invalid prompt payload',
+            referenceImageUrl: request?.referenceImageUrl
+          }
         }
-      }
+
+        const image = await generateImage({
+          prompt: request.prompt,
+          referenceImageUrl: request.referenceImageUrl,
+          referenceImageUrls: request.referenceImageUrls,
+          size: request.size || defaultSize,
+          responseFormat: defaultFormat
+        })
+
+        // 持久化到 MongoDB（可选）
+        if (imagesColl && scriptId) {
+          try {
+            const uniqueId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+              ? crypto.randomUUID()
+              : `${scriptId}-${Date.now()}-${index}`
+            await imagesColl.insertOne({
+              id: uniqueId,
+              script_id: scriptId,
+              prompt: image.prompt || request.prompt,
+              image_url: image.url,
+              shot_number: request.shot_number,
+              status: 'completed',
+              created_at: nowIso
+            })
+          } catch (persistErr) {
+            console.error('Failed to persist generated image', persistErr)
+          }
+        }
+        return image
+      })())
+
+      const settled = await Promise.allSettled(tasks)
+      settled.forEach((res, offset) => {
+        const idx = start + offset
+        if (res.status === 'fulfilled') {
+          results[idx] = res.value
+        } else {
+          console.error('generateImage failed', res.reason)
+          const req = slice[offset]
+          results[idx] = {
+            url: 'https://via.placeholder.com/1024x1024?text=Generation+Error',
+            prompt: req?.prompt || 'Generation error',
+            referenceImageUrl: req?.referenceImageUrl
+          }
+        }
+      })
     }
 
     return NextResponse.json({ results })
