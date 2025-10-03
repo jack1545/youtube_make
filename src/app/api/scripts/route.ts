@@ -213,3 +213,66 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: error?.message || 'Internal error' }, { status: 500 })
   }
 }
+
+// DELETE /api/scripts
+// body: { id: string }
+export async function DELETE(req: Request) {
+  try {
+    const payload = await req.json().catch(() => null)
+    if (!payload || typeof payload !== 'object') {
+      return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+    }
+
+    const { id } = payload as { id?: string }
+    if (!id || typeof id !== 'string') {
+      return NextResponse.json({ error: 'Missing required field: id' }, { status: 400 })
+    }
+
+    const db = await getDb()
+    const scriptsCol = db.collection('scripts')
+    const { ObjectId } = await import('mongodb')
+    const isValidObjectId = ObjectId.isValid(id)
+
+    // Find script by _id or legacy id
+    const filterObj = isValidObjectId ? { $or: [{ _id: new ObjectId(id) }, { id }] } : { id }
+    const doc = await scriptsCol.findOne(filterObj)
+    if (!doc) {
+      return NextResponse.json({ error: 'Script not found' }, { status: 404 })
+    }
+
+    const scriptIdVariants: string[] = Array.from(
+      new Set([
+        id,
+        (doc as any).id as string | undefined,
+        (doc as any)._id ? String((doc as any)._id) : undefined
+      ].filter(Boolean) as string[])
+    )
+
+    // Cascade delete related collections
+    const imagesCol = db.collection('generated_images')
+    const videosCol = db.collection('generated_videos')
+    const vPromptsCol = db.collection('video_prompts')
+    const analysesCol = db.collection('script_analyses')
+
+    const imgRes = await imagesCol.deleteMany({ script_id: { $in: scriptIdVariants } })
+    const vidRes = await videosCol.deleteMany({ script_id: { $in: scriptIdVariants } })
+    const vpRes = await vPromptsCol.deleteMany({ script_id: { $in: scriptIdVariants } })
+    const anRes = await analysesCol.deleteMany({ script_id: { $in: scriptIdVariants } })
+
+    const delRes = await scriptsCol.deleteOne({ _id: (doc as any)._id })
+
+    return NextResponse.json({
+      ok: true,
+      deleted: {
+        images: (imgRes as any).deletedCount ?? 0,
+        videos: (vidRes as any).deletedCount ?? 0,
+        video_prompts: (vpRes as any).deletedCount ?? 0,
+        analyses: (anRes as any).deletedCount ?? 0,
+        script: (delRes as any).deletedCount ?? 0
+      }
+    })
+  } catch (error: any) {
+    console.error('DELETE /api/scripts failed', error)
+    return NextResponse.json({ error: error?.message || 'Internal error' }, { status: 500 })
+  }
+}

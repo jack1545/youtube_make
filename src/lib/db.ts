@@ -224,8 +224,20 @@ export async function getScripts(projectId: string): Promise<Script[]> {
     const params = new URLSearchParams({ project_id: projectId })
     const res = await fetch(`${baseOrigin}/api/scripts?${params.toString()}`)
     if (!res.ok) {
-      const err = await res.json().catch(() => null)
-      console.error('API:get scripts failed', err)
+      // 更稳健的错误处理：优先读取文本，再尝试解析为JSON
+      let errMsg = ''
+      try {
+        const t = await res.text()
+        try {
+          const j: any = JSON.parse(t)
+          errMsg = j?.error || t
+        } catch {
+          errMsg = t
+        }
+      } catch {
+        errMsg = `HTTP ${res.status}`
+      }
+      console.warn(`API:get scripts failed (status ${res.status})`, errMsg)
       return []
     }
     const data = await res.json()
@@ -262,6 +274,48 @@ export async function updateScript(id: string, content: ScriptSegment[], rawText
     return data.item as Script
   } catch (error) {
     console.error('Failed to update script via API', error)
+    throw error
+  }
+}
+
+export async function deleteScript(id: string): Promise<void> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    // Remove script in demo storage if belongs to current user's project
+    for (let i = demoScripts.length - 1; i >= 0; i--) {
+      if (demoScripts[i].id === id) {
+        demoScripts.splice(i, 1)
+      }
+    }
+    // Remove linked demo images/videos
+    for (let i = demoImages.length - 1; i >= 0; i--) {
+      if (demoImages[i].script_id === id) {
+        demoImages.splice(i, 1)
+      }
+    }
+    for (let i = demoVideos.length - 1; i >= 0; i--) {
+      if (demoVideos[i].script_id === id) {
+        demoVideos.splice(i, 1)
+      }
+    }
+    return
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/scripts`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to delete script (HTTP ${res.status})`)
+    }
+    await res.json().catch(() => null)
+  } catch (error) {
+    console.error('Failed to delete script via API', error)
     throw error
   }
 }
@@ -636,7 +690,7 @@ export async function createGeneratedVideo(
   prompt: string,
   scriptId?: string | null,
   shotNumber?: number,
-  status: string = 'pending',
+  status: 'pending' | 'processing' | 'completed' | 'failed' = 'pending',
   videoUrl?: string
 ): Promise<GeneratedVideo> {
   const user = getCurrentUser()
@@ -645,7 +699,7 @@ export async function createGeneratedVideo(
     const video: GeneratedVideo = {
       id: `demo_video_${Date.now()}`,
       user_id: user.id,
-      script_id: scriptId,
+      script_id: scriptId ?? null,
       image_url: imageUrl,
       prompt,
       video_url: typeof videoUrl === 'string' ? videoUrl : '',
@@ -791,7 +845,7 @@ export async function updateReferenceImageLabel(id: string, label: string | null
     const idx = demoReferenceImages.findIndex(img => img.id === id && img.user_id === user.id)
     if (idx >= 0) {
       const trimmed = typeof label === 'string' ? label.trim() : null
-      demoReferenceImages[idx] = { ...demoReferenceImages[idx], label: trimmed ?? null, labels: trimmed ? [trimmed] : [] }
+      demoReferenceImages[idx] = { ...demoReferenceImages[idx], label: trimmed ?? undefined, labels: trimmed ? [trimmed] : [] }
       invalidateRefCaches(user.id)
       return demoReferenceImages[idx]
     }
@@ -864,7 +918,7 @@ export async function removeReferenceImageLabel(id: string, label: string): Prom
     if (idx >= 0) {
       const labels = Array.isArray((demoReferenceImages[idx] as any).labels) ? (demoReferenceImages[idx] as any).labels : []
       const trimmed = label.trim()
-      const nextLabels = labels.filter(l => l !== trimmed)
+      const nextLabels = labels.filter((l: string) => l !== trimmed)
       demoReferenceImages[idx] = { ...demoReferenceImages[idx], labels: nextLabels }
       invalidateRefCaches(user.id)
       return demoReferenceImages[idx]
@@ -1013,8 +1067,8 @@ export async function deleteReferenceFolder(name: string): Promise<void> {
   const user = getCurrentUser()
 
   if (isDemoMode) {
-    // 参考图置为未归类
-    demoReferenceImages = demoReferenceImages.map(img => (img.user_id === user.id && img.label === name ? { ...img, label: null } : img))
+    // 参考图置为未归类（label 设为 undefined 以匹配类型）
+    demoReferenceImages = demoReferenceImages.map(img => (img.user_id === user.id && img.label === name ? { ...img, label: undefined } : img))
     // 删除显式目录记录
     demoReferenceFolders = demoReferenceFolders.filter(f => !(f.user_id === user.id && f.name === name))
     return

@@ -3,7 +3,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { generateBatchImages } from '@/lib/doubao'
 import { createVeo3Job } from '@/lib/veo3'
-import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject, updateReferenceImageLabel, addReferenceImageLabel, removeReferenceImageLabel, updateScript, updateGeneratedImage, addReferenceVideo, getReferenceVideos, removeReferenceVideo, addReferenceFolder, getReferenceFolders, getReferenceImagesByLabel, deleteReferenceFolder, renameReferenceFolder } from '@/lib/db'
+import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject, updateReferenceImageLabel, addReferenceImageLabel, removeReferenceImageLabel, updateScript, updateGeneratedImage, addReferenceVideo, getReferenceVideos, removeReferenceVideo, addReferenceFolder, getReferenceFolders, getReferenceImagesByLabel, deleteReferenceFolder, renameReferenceFolder, deleteScript } from '@/lib/db'
 import type { ReferenceImage, ScriptSegment as DbScriptSegment, Project, Script, GeneratedImage, GeneratedVideo, ReferenceVideo, ReferenceFolder } from '@/lib/types'
 import { supabase, isDemoMode } from '@/lib/supabase'
 import ReactMarkdown from 'react-markdown'
@@ -99,21 +99,34 @@ const CUSTOM_DEFAULT_DIMENSIONS: Record<AspectOption, { width: number; height: n
   '3:4': { width: 1536, height: 2048 }
 }
 
-// 提取 YouTube 视频ID（支持 watch?v=、youtu.be、embed 等常见格式）
+// 提取 YouTube 视频ID（支持 watch?v=、youtu.be、embed、shorts 等常见格式）
 function extractYouTubeId(url: string): string | null {
   try {
     const u = new URL(url)
-    if (/youtube\.com$/i.test(u.hostname) || /www\.youtube\.com$/i.test(u.hostname)) {
+    const host = u.hostname.toLowerCase()
+    const pathParts = u.pathname.split('/').filter(Boolean)
+
+    // youtube.com（含子域，如 www/m）
+    if (host.endsWith('youtube.com')) {
+      // 1) 标准 watch?v=
       const v = u.searchParams.get('v')
       if (v) return v
-      const paths = u.pathname.split('/').filter(Boolean)
-      const idx = paths.indexOf('embed')
-      if (idx >= 0 && paths[idx + 1]) return paths[idx + 1]
+
+      // 2) shorts/<id>
+      const shortsIdx = pathParts.indexOf('shorts')
+      if (shortsIdx >= 0 && pathParts[shortsIdx + 1]) return pathParts[shortsIdx + 1]
+
+      // 3) embed/<id>
+      const embedIdx = pathParts.indexOf('embed')
+      if (embedIdx >= 0 && pathParts[embedIdx + 1]) return pathParts[embedIdx + 1]
     }
-    if (/youtu\.be$/i.test(u.hostname) || /www\.youtu\.be$/i.test(u.hostname)) {
-      const id = u.pathname.split('/').filter(Boolean)[0]
+
+    // youtu.be/<id>
+    if (host.endsWith('youtu.be')) {
+      const id = pathParts[0]
       return id || null
     }
+
     return null
   } catch {
     return null
@@ -706,6 +719,12 @@ export default function StoryboardWorkflowPage() {
   const [worldviewReferences, setWorldviewReferences] = useState('')
   const [isSavingWorldview, setIsSavingWorldview] = useState(false)
   const [worldviewSavedInfo, setWorldviewSavedInfo] = useState('')
+  const [isSavingChild, setIsSavingChild] = useState(false)
+  // 自定义子脚本（CSV）输入
+  const [customChildName, setCustomChildName] = useState('')
+  const [customChildCsv, setCustomChildCsv] = useState('')
+  const [isSavingCustomChild, setIsSavingCustomChild] = useState(false)
+  const [customChildError, setCustomChildError] = useState<string | null>(null)
   // 世界观预设管理
   const DEFAULT_WORLDVIEWS = ['赛博朋克', '克苏鲁', '蒸汽朋克', '生物朋克']
   const [worldviews, setWorldviews] = useState<string[]>(DEFAULT_WORLDVIEWS)
@@ -744,6 +763,7 @@ export default function StoryboardWorkflowPage() {
   const [isRefPanelOpen, setIsRefPanelOpen] = useState(true)
   // 右侧“批量替换预览文本”悬浮面板折叠状态（默认折叠）
   const [isBulkPanelOpen, setIsBulkPanelOpen] = useState(false)
+  // 子脚本相关辅助定义移动到 existingScripts 初始化之后
 
 const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [doubaoResolution, setDoubaoResolution] = useState<DoubaoResolution>('4K')
@@ -770,7 +790,7 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [isLoadingMoreRefs, setIsLoadingMoreRefs] = useState<boolean>(false)
 
   // 参考图目录分页状态
-  const [folders, setFolders] = useState<{ id: string; name: string; label: string | null; cover_url: string | null; count?: number; created_at: string }[]>([])
+  const [folders, setFolders] = useState<ReferenceFolder[]>([])
   const [folderCursor, setFolderCursor] = useState<string | null>(null)
   const [folderHasMore, setFolderHasMore] = useState<boolean>(true)
   const [isLoadingFolders, setIsLoadingFolders] = useState<boolean>(false)
@@ -887,6 +907,103 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [isLoadingExisting, setIsLoadingExisting] = useState<boolean>(false)
 const [isRenamingProject, setIsRenamingProject] = useState<boolean>(false)
 const [isDeletingProject, setIsDeletingProject] = useState<boolean>(false)
+
+  // 子脚本（世界观）辅助：从 raw_text 提取世界观名，并过滤子脚本列表
+  const extractWorldviewName = useCallback((raw?: string): string => {
+    const firstLine = ((raw || '').split(/\r?\n/)[0] || '').trim()
+    const m = firstLine.match(/^(世界观|Worldview)[：:]\s*(.+)$/)
+    return m ? m[2] : ''
+  }, [])
+  const childScripts = useMemo(() => {
+    return existingScripts.filter(s => {
+      const name = extractWorldviewName(s.raw_text)
+      return !!name
+    })
+  }, [existingScripts, extractWorldviewName])
+
+  // 子脚本编辑状态：用于重命名与快捷保存
+  const [editingChildId, setEditingChildId] = useState<string | null>(null)
+  const [editingChildName, setEditingChildName] = useState<string>('')
+
+  // 从 textarea 原始脚本中解析分镜编号用于高亮预览
+  const shotNumberPreview = useMemo(() => {
+    const lines = String(rawJson || '').replace(/\r\n/g, '\n').split('\n')
+    const items: Array<{ num: string; text: string }> = []
+    for (const line of lines) {
+      const m = line.match(/^\s*(\d+)[\.、:：]\s*(.*)$/)
+      if (m) {
+        items.push({ num: m[1], text: m[2] })
+      }
+    }
+    return items
+  }, [rawJson])
+
+  const loadScriptIntoStoryboard = useCallback(async (script: Script) => {
+    const mapped: StoryboardSegment[] = (script.content || []).map((seg, idx) => {
+      const pd = (seg as DbScriptSegment).prompt_detail
+      const promptObj = pd
+        ? {
+            subject: pd.subject
+              ? {
+                  characters_present: pd.subject.characters_present,
+                  expression: pd.subject.expression,
+                  action: pd.subject.action
+                }
+              : undefined,
+            environment: pd.environment,
+            time_of_day: pd.time_of_day,
+            weather: pd.weather,
+            camera_angle: pd.camera_angle,
+            shot_size: pd.shot_size
+          }
+        : undefined
+      const promptText = (seg as DbScriptSegment).prompt?.trim().length ? (seg as DbScriptSegment).prompt : formatPromptChinese(promptObj)
+      return {
+        id: (seg as DbScriptSegment).id || `shot-${idx + 1}`,
+        shotNumber: idx + 1,
+        prompt: promptObj,
+        promptText: promptText || `Shot ${idx + 1}`
+      }
+    })
+
+    const wvName = extractWorldviewName(script.raw_text)
+    setSegments(mapped)
+    setSelectedForImages(mapped.map(s => s.id))
+    setSelectedForVideo([])
+    setImageResults({})
+    setVideoJobs({})
+    setVideoPromptOverrides({})
+    setParseError(null)
+    setProjectId(script.project_id)
+    setScriptId(script.id)
+    setRawJson(script.raw_text || '')
+
+    try {
+      const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+      const params = new URLSearchParams({ script_id: script.id, latest: '1' })
+      const res = await fetch(`${baseOrigin}/api/script-analyses?${params.toString()}`)
+      if (res.ok) {
+        const data = await res.json()
+        const item = data.item
+        if (item) {
+          setAnalysis(item.analysis || '')
+          setAnalysisId(item.id || '')
+        } else {
+          setAnalysis('')
+          setAnalysisId('')
+        }
+      } else {
+        setAnalysis('')
+        setAnalysisId('')
+      }
+    } catch {
+      setAnalysis('')
+      setAnalysisId('')
+    }
+
+    if (wvName) setWorldview(wvName)
+    setStatus({ type: 'success', text: wvName ? `已加载子脚本：${wvName}` : '已加载脚本。' })
+  }, [extractWorldviewName])
 
   // 图片放大预览（模态框）
   const [imagePreview, setImagePreview] = useState<{ url: string; alt: string } | null>(null)
@@ -1865,7 +1982,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               shot_number: segment.shotNumber
             }
           ],
-          { size: doubaoSizeValue, scriptId }
+          { size: doubaoSizeValue, scriptId: scriptId ?? undefined }
         )
 
         if (result) {
@@ -1953,7 +2070,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           onProgress: (completed, total) => {
             setImageProgress(Math.round((completed / total) * 100))
           },
-          scriptId
+          scriptId: scriptId ?? undefined
         }
       )
 
@@ -2492,7 +2609,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
               aria-expanded={isBulkPanelOpen}
             >
-              <span>Bulk replace text in the original script</span>
+              <span>批量替换原始脚本文本（仅 textarea）</span>
             </button>
             {isBulkPanelOpen && (
               <div className="px-3 pb-3">
@@ -2673,11 +2790,11 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                 try {
                   const segmentsMapped = segments.map(s => ({
                     id: s.id,
-                    scene: s.prompt?.subject?.action || s.prompt?.environment || '',
-                    prompt: s.promptText,
-                    characters: [],
-                    setting: s.prompt?.environment || '',
-                    mood: s.prompt?.time_of_day || ''
+                    scene: String(s.prompt?.subject?.action ?? s.prompt?.environment ?? ''),
+                    prompt: String(s.promptText ?? ''),
+                    characters: [] as string[],
+                    setting: String(s.prompt?.environment ?? ''),
+                    mood: String(s.prompt?.time_of_day ?? '')
                   }))
                   // 若尚未创建项目，则自动创建一个默认项目并继续保存脚本
                   let ensuredProjectId = projectId
@@ -2715,7 +2832,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                   if (!scriptId) {
                     let script
                     try {
-                      script = await createScript(ensuredProjectId, segmentsMapped, rawJson)
+                      script = await createScript(ensuredProjectId!, segmentsMapped, rawJson)
                     } catch (err: any) {
                       const msg = String(err?.message || '')
                       if (msg.includes('Invalid project_id')) {
@@ -2728,7 +2845,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                         setSelectedExistingProjectId(newProject.id)
                         const refreshed = await getProjects()
                         setExistingProjects(refreshed)
-                        script = await createScript(ensuredProjectId, segmentsMapped, rawJson)
+                        script = await createScript(ensuredProjectId!, segmentsMapped, rawJson)
                       } else {
                         throw err
                       }
@@ -2752,12 +2869,301 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             </button>
           </div>
         </div>
+        {/* 子脚本（世界观）列表：点击可回填至当前工作区 */}
+        <div className="rounded-md border border-gray-200 bg-gray-50 p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-800">子脚本（按世界观）</h3>
+            <span className="text-xs text-gray-500">{childScripts.length ? `共 ${childScripts.length} 个` : '暂无子脚本'}</span>
+          </div>
+          <div className="mt-1 flex flex-col gap-2">
+            {childScripts.map(s => {
+              const name = extractWorldviewName(s.raw_text) || '未命名世界观'
+              const isEditing = editingChildId === s.id
+              return (
+                <div key={s.id} className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="rounded border border-indigo-300 px-2 py-1 text-[11px] text-indigo-700 hover:bg-white"
+                    onClick={() => loadScriptIntoStoryboard(s)}
+                    title={`加载子脚本：${name}`}
+                  >
+                    {name}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border border-green-300 px-2 py-1 text-[11px] text-green-700 hover:bg-white"
+                    title="将左侧当前原始脚本与分镜保存覆盖到该子脚本"
+                    onClick={async () => {
+                      try {
+                        const segmentsMapped = segments.map((seg, idx) => ({
+                          id: seg.id || `shot-${idx + 1}`,
+                          scene: String(seg.prompt?.subject?.action ?? seg.prompt?.environment ?? ''),
+                          prompt: String(seg.promptText ?? ''),
+                          characters: [] as string[],
+                          setting: String(seg.prompt?.environment ?? ''),
+                          mood: String(seg.prompt?.time_of_day ?? ''),
+                          prompt_detail: seg.prompt
+                            ? {
+                                subject: {
+                                  characters_present: String(seg.prompt.subject?.characters_present ?? ''),
+                                  expression: String(seg.prompt.subject?.expression ?? ''),
+                                  action: String(seg.prompt.subject?.action ?? '')
+                                },
+                                environment: String(seg.prompt.environment ?? ''),
+                                time_of_day: String(seg.prompt.time_of_day ?? ''),
+                                weather: String(seg.prompt.weather ?? ''),
+                                camera_angle: String(seg.prompt.camera_angle ?? ''),
+                                shot_size: String(seg.prompt.shot_size ?? '')
+                              }
+                            : undefined
+                        }))
+                        const updated = await updateScript(s.id, segmentsMapped, rawJson)
+                        // 刷新脚本列表
+                        try {
+                          const scripts = await getScripts(updated.project_id)
+                          setExistingScripts(scripts)
+                        } catch { /* ignore */ }
+                        setStatus({ type: 'success', text: '已保存当前内容到该子脚本。' })
+                      } catch (err) {
+                        console.error('保存到子脚本失败', err)
+                        setStatus({ type: 'error', text: '保存到子脚本失败。' })
+                      }
+                    }}
+                  >
+                    保存当前到此
+                  </button>
+                  {!isEditing && (
+                    <button
+                      type="button"
+                      className="rounded border border-yellow-300 px-2 py-1 text-[11px] text-yellow-700 hover:bg-white"
+                      title="重命名子脚本（仅修改世界观名称）"
+                      onClick={() => {
+                        setEditingChildId(s.id)
+                        setEditingChildName(name)
+                      }}
+                    >
+                      重命名
+                    </button>
+                  )}
+                  {isEditing && (
+                    <>
+                      <input
+                        type="text"
+                        value={editingChildName}
+                        onChange={e => setEditingChildName(e.target.value)}
+                        className="w-40 rounded border border-yellow-300 px-2 py-1 text-[11px] bg-white"
+                        placeholder="世界观名称"
+                      />
+                      <button
+                        type="button"
+                        className="rounded border border-yellow-300 px-2 py-1 text-[11px] text-yellow-700 hover:bg-white"
+                        onClick={async () => {
+                          try {
+                            const lines = (s.raw_text || '').split(/\r?\n/)
+                            const body = lines.slice(1).join('\n')
+                            const nextRaw = `世界观：${editingChildName}\n${body}`
+                            const updated = await updateScript(s.id, s.content || [], nextRaw)
+                            try {
+                              const scripts = await getScripts(updated.project_id)
+                              setExistingScripts(scripts)
+                            } catch { /* ignore */ }
+                            setEditingChildId(null)
+                            setEditingChildName('')
+                            setStatus({ type: 'success', text: '子脚本已重命名。' })
+                          } catch (err) {
+                            console.error('重命名子脚本失败', err)
+                            setStatus({ type: 'error', text: '重命名子脚本失败。' })
+                          }
+                        }}
+                      >
+                        保存名称
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                        onClick={() => {
+                          setEditingChildId(null)
+                          setEditingChildName('')
+                        }}
+                      >
+                        取消
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    className="rounded border border-red-300 px-2 py-1 text-[11px] text-red-700 hover:bg-white"
+                    title="删除该子脚本"
+                    onClick={async () => {
+                      try {
+                        await deleteScript(s.id)
+                        // 刷新脚本列表
+                        try {
+                          const scripts = await getScripts(s.project_id)
+                          setExistingScripts(scripts)
+                        } catch { /* ignore */ }
+                        setStatus({ type: 'success', text: '已删除子脚本。' })
+                      } catch (err) {
+                        console.error('删除子脚本失败', err)
+                        setStatus({ type: 'error', text: '删除子脚本失败。' })
+                      }
+                    }}
+                  >
+                    删除
+                  </button>
+                </div>
+              )
+            })}
+            {!childScripts.length && (
+              <div className="rounded border border-dashed px-2 py-1 text-[11px] text-gray-500">保存世界观改写后，将在此显示列表。</div>
+            )}
+          </div>
+          {/* 自定义子脚本（CSV）添加 */}
+          <div className="mt-3 rounded border border-dashed p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <h4 className="text-xs font-semibold text-gray-700">自定义子脚本（CSV）</h4>
+              {isSavingCustomChild && (
+                <span className="text-xs text-gray-500">保存中…</span>
+              )}
+            </div>
+            <div className="grid gap-2 md:grid-cols-[160px_minmax(0,1fr)_auto]">
+              <input
+                type="text"
+                value={customChildName}
+                onChange={e => setCustomChildName(e.target.value)}
+                placeholder="世界观/名称"
+                className="rounded border border-indigo-200 px-2 py-1 text-[11px] bg-white"
+              />
+              <textarea
+                value={customChildCsv}
+                onChange={e => setCustomChildCsv(e.target.value)}
+                placeholder="粘贴 CSV 文本（分镜数,分镜提示词）"
+                className="h-20 w-full rounded-md border border-indigo-200 px-2 py-1 text-[11px] font-mono bg-white"
+              />
+              <button
+                type="button"
+                className="rounded border border-green-300 px-2 py-1 text-[11px] text-green-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                disabled={isSavingCustomChild || !customChildName.trim() || !customChildCsv.trim()}
+                onClick={async () => {
+                  try {
+                    setCustomChildError(null)
+                    setIsSavingCustomChild(true)
+                    const parsed = parseStoryboardCsv(customChildCsv)
+                    if (!parsed.length) {
+                      setCustomChildError('CSV 解析失败或为空。')
+                      return
+                    }
+                    const segmentsMapped: DbScriptSegment[] = parsed.map((s, i) => ({
+                      id: s.id || `shot-${i + 1}`,
+                      scene: String(s.prompt?.subject?.action ?? s.prompt?.environment ?? ''),
+                      prompt: String(s.promptText ?? ''),
+                      characters: [] as string[],
+                      setting: String(s.prompt?.environment ?? ''),
+                      mood: String(s.prompt?.time_of_day ?? ''),
+                      prompt_detail: {
+                        subject: {
+                          characters_present: String(s.prompt?.subject?.characters_present ?? ''),
+                          expression: String(s.prompt?.subject?.expression ?? ''),
+                          action: String(s.prompt?.subject?.action ?? '')
+                        },
+                        environment: String(s.prompt?.environment ?? ''),
+                        time_of_day: String(s.prompt?.time_of_day ?? ''),
+                        weather: String(s.prompt?.weather ?? ''),
+                        camera_angle: String(s.prompt?.camera_angle ?? ''),
+                        shot_size: String(s.prompt?.shot_size ?? '')
+                      }
+                    }))
+
+                    // 确保项目存在
+                    let ensuredProjectId = selectedExistingProjectId || projectId
+                    if (!ensuredProjectId) {
+                      try {
+                        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                        const defaultName = `Storyboard Project ${stamp}`
+                        const fallbackProject = await createProject(defaultName, 'Auto-created when saving custom child script')
+                        ensuredProjectId = fallbackProject.id
+                        setProjectId(fallbackProject.id)
+                        setProjectName(fallbackProject.name)
+                        setSelectedExistingProjectId(fallbackProject.id)
+                        const refreshed = await getProjects().catch(() => [])
+                        if (Array.isArray(refreshed)) setExistingProjects(refreshed)
+                        setStatus({ type: 'success', text: `已自动创建项目：${fallbackProject.name}` })
+                      } catch (e) {
+                        console.error('创建项目失败', e)
+                        setCustomChildError('创建项目失败。')
+                        return
+                      }
+                    }
+
+                    const rawText = `世界观：${customChildName}\n${customChildCsv}`
+                    let script
+                    try {
+                      script = await createScript(ensuredProjectId!, segmentsMapped, rawText)
+                    } catch (err: any) {
+                      const msg = String(err?.message || '')
+                      if (msg.includes('Invalid project_id')) {
+                        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                        const defaultName = `Storyboard Project ${stamp}`
+                        const newProject = await createProject(defaultName, 'Auto-created on retry when saving custom child script')
+                        ensuredProjectId = newProject.id
+                        setProjectId(newProject.id)
+                        setProjectName(newProject.name)
+                        setSelectedExistingProjectId(newProject.id)
+                        const refreshed = await getProjects()
+                        setExistingProjects(refreshed)
+                        script = await createScript(ensuredProjectId!, segmentsMapped, rawText)
+                      } else {
+                        throw err
+                      }
+                    }
+
+                    try {
+                      const scripts = await getScripts(ensuredProjectId!)
+                      setExistingScripts(scripts)
+                    } catch { /* ignore */ }
+                    await loadScriptIntoStoryboard(script)
+                    setCustomChildName('')
+                    setCustomChildCsv('')
+                    setStatus({ type: 'success', text: '已保存自定义子脚本并加载到工作区。' })
+                  } catch (error) {
+                    console.error('保存自定义子脚本失败', error)
+                    setCustomChildError('保存自定义子脚本失败。')
+                  } finally {
+                    setIsSavingCustomChild(false)
+                  }
+                }}
+                title="保存为子脚本，不覆盖原始脚本"
+              >
+                {isSavingCustomChild ? '保存中…' : '保存为子脚本'}
+              </button>
+            </div>
+            {customChildError && (
+              <p className="mt-2 text-xs text-red-600">{customChildError}</p>
+            )}
+          </div>
+        </div>
         <textarea
           value={rawJson}
           onChange={event => setRawJson(event.target.value)}
           className="h-64 w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
           placeholder="Paste storyboard JSON array or CSV text here"
         />
+        {/* 分镜编号高亮预览：从 textarea 解析编号并以醒目颜色展示 */}
+        {shotNumberPreview.length > 0 && (
+          <div className="mt-2 rounded-md border border-yellow-200 bg-yellow-50 p-2">
+            <p className="text-xs font-medium text-yellow-800">分镜编号标注预览（来源：左侧 textarea）</p>
+            <div className="mt-2 space-y-1 font-mono text-xs">
+              {shotNumberPreview.map((item, idx) => (
+                <div key={idx} className="flex items-start gap-2">
+                  <span className="inline-flex items-center justify-center rounded bg-yellow-300 px-2 py-0.5 font-bold text-yellow-900">
+                    {item.num}
+                  </span>
+                  <span className="text-gray-800">{item.text}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {parseError && <p className="text-sm text-red-600">{parseError}</p>}
         {analyzeError && <p className="text-sm text-red-600">{analyzeError}</p>}
 
@@ -2773,7 +3179,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               value={newYoutubeUrl}
               onChange={e => setNewYoutubeUrl(e.target.value)}
               className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="粘贴 YouTube 视频链接，例如 https://youtu.be/xxxx 或 https://www.youtube.com/watch?v=xxxx"
+              placeholder="粘贴 YouTube 视频链接，例如 https://youtu.be/xxxx、https://www.youtube.com/watch?v=xxxx 或 https://www.youtube.com/shorts/xxxx"
             />
             <input
               type="text"
@@ -3120,19 +3526,120 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               </button>
               <button
                 type="button"
-                className="rounded border border-green-300 px-2 py-1 text-[11px] text-green-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
-                onClick={() => worldviewResult && setRawJson(worldviewResult)}
-                disabled={!worldviewResult}
-                title="将改写的CSV覆盖到原始脚本文本框"
-              >
-                覆盖到原始脚本
-              </button>
-              <button
-                type="button"
                 className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
                 onClick={() => { setWorldviewResult(''); setWorldviewError(null) }}
               >
                 清除
+              </button>
+              <button
+                type="button"
+                className="rounded border border-green-300 px-2 py-1 text-[11px] text-green-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                onClick={async () => {
+                  try {
+                    if (!worldviewResult.trim()) {
+                      setWorldviewError('请先生成世界观改写的CSV。')
+                      return
+                    }
+                    setWorldviewError(null)
+                    setIsSavingChild(true)
+                    // 解析 CSV 为分镜段
+                    const parsed = parseStoryboardCsv(worldviewResult)
+                    if (!parsed.length) {
+                      setWorldviewError('CSV 解析失败或为空，无法保存为子脚本。')
+                      return
+                    }
+                    // 映射为数据库脚本段结构（确保 PromptDetail 字段为严格字符串类型）
+                    const segmentsMapped: DbScriptSegment[] = parsed.map((s, i) => ({
+                      id: s.id || `shot-${i + 1}`,
+                      scene: (s.prompt?.subject?.action || s.prompt?.environment || ''),
+                      prompt: (typeof s.promptText === 'string' ? s.promptText : String(s.promptText ?? '')),
+                      characters: Array.isArray((s as any).characters) ? ((s as any).characters as string[]) : [],
+                      setting: String(s.prompt?.environment ?? ''),
+                      mood: String(s.prompt?.time_of_day ?? ''),
+                      prompt_detail: {
+                        subject: {
+                          characters_present: String(s.prompt?.subject?.characters_present ?? ''),
+                          expression: String(s.prompt?.subject?.expression ?? ''),
+                          action: String(s.prompt?.subject?.action ?? '')
+                        },
+                        environment: String(s.prompt?.environment ?? ''),
+                        time_of_day: String(s.prompt?.time_of_day ?? ''),
+                        weather: String(s.prompt?.weather ?? ''),
+                        camera_angle: String(s.prompt?.camera_angle ?? ''),
+                        shot_size: String(s.prompt?.shot_size ?? '')
+                      }
+                    }))
+                    // 确保项目存在；若不存在则创建默认项目
+                    let ensuredProjectId = projectId
+                    try {
+                      const projects = await getProjects()
+                      const exists = ensuredProjectId ? projects.some(p => p.id === ensuredProjectId) : false
+                      if (!exists) {
+                        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                        const defaultName = `Storyboard Project ${stamp}`
+                        const newProject = await createProject(defaultName, 'Auto-created when saving worldview child script')
+                        ensuredProjectId = newProject.id
+                        setProjectId(newProject.id)
+                        setProjectName(newProject.name)
+                        setSelectedExistingProjectId(newProject.id)
+                        const refreshed = await getProjects()
+                        setExistingProjects(refreshed)
+                        setStatus({ type: 'success', text: `已自动创建项目：${newProject.name}` })
+                      }
+                    } catch (verifyErr) {
+                      console.warn('校验项目存在性失败，将尝试创建默认项目以继续保存子脚本。', verifyErr)
+                      if (!ensuredProjectId) {
+                        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                        const defaultName = `Storyboard Project ${stamp}`
+                        const fallbackProject = await createProject(defaultName, 'Auto-created when saving worldview child script')
+                        ensuredProjectId = fallbackProject.id
+                        setProjectId(fallbackProject.id)
+                        setProjectName(fallbackProject.name)
+                        setSelectedExistingProjectId(fallbackProject.id)
+                        const refreshed = await getProjects().catch(() => [])
+                        if (Array.isArray(refreshed)) setExistingProjects(refreshed)
+                        setStatus({ type: 'success', text: `已自动创建项目：${fallbackProject.name}` })
+                      }
+                    }
+                    // 构造原始文本，便于提取世界观名与回显
+                    const rawText = `世界观：${worldview}\n${worldviewResult}`
+                    let script
+                    try {
+                      script = await createScript(ensuredProjectId!, segmentsMapped, rawText)
+                    } catch (err: any) {
+                      const msg = String(err?.message || '')
+                      if (msg.includes('Invalid project_id')) {
+                        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                        const defaultName = `Storyboard Project ${stamp}`
+                        const newProject = await createProject(defaultName, 'Auto-created on retry when saving worldview child script')
+                        ensuredProjectId = newProject.id
+                        setProjectId(newProject.id)
+                        setProjectName(newProject.name)
+                        setSelectedExistingProjectId(newProject.id)
+                        const refreshed = await getProjects()
+                        setExistingProjects(refreshed)
+                        script = await createScript(ensuredProjectId!, segmentsMapped, rawText)
+                      } else {
+                        throw err
+                      }
+                    }
+                    // 刷新脚本列表并加载子脚本
+                    try {
+                      const scripts = await getScripts(ensuredProjectId!)
+                      setExistingScripts(scripts)
+                    } catch { /* ignore */ }
+                    await loadScriptIntoStoryboard(script)
+                  } catch (error) {
+                    console.error('保存子脚本失败', error)
+                    setWorldviewError('保存子脚本失败。')
+                  } finally {
+                    setIsSavingChild(false)
+                  }
+                }}
+                disabled={isSavingChild || !worldviewResult.trim()}
+                title="将改写后的 CSV 另存为子脚本，不覆盖原始脚本"
+              >
+                {isSavingChild ? '保存中…' : '保存为子脚本'}
               </button>
             </div>
           </div>
@@ -3668,7 +4175,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         {hasSegments && (
           <div className="mt-4 space-y-3 rounded-md border border-gray-200 bg-gray-50 p-4">
             <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-              <p className="text-sm font-medium text-gray-700">Bulk replace text in the preview shots</p>
+              <p className="text-sm font-medium text-gray-700">批量替换原始脚本文本（仅 textarea，分镜不变）</p>
               <button
                 type="button"
                 onClick={handleBulkReplaceSegments}
@@ -3692,9 +4199,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                 className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 placeholder="Replace with"
               />
-              <p className="text-xs text-gray-500 md:col-span-1">
-                Fields inside the structured prompt will be updated when possible.
-              </p>
+              <p className="text-xs text-gray-500 md:col-span-1">不影响分镜预览文本，仅修改左侧原始脚本。</p>
             </div>
             {/* 替换选项（默认提供角色A>参考图1、角色B>参考图2、角色C>参考图3） */}
             <div className="mt-2 space-y-2">

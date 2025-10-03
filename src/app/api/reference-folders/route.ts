@@ -19,8 +19,8 @@ export async function GET(req: Request) {
     }
 
     const db = await getDb()
-    const imgColl = db.collection('reference_images')
-    const folderColl = db.collection('reference_folders')
+    const imgColl = db.collection<any>('reference_images')
+    const folderColl = db.collection<any>('reference_folders')
 
     // 聚合参考图目录：支持 labels 数组与旧字段 label
     const agg = await imgColl
@@ -145,7 +145,7 @@ export async function POST(req: Request) {
     }
 
     const db = await getDb()
-    const coll = db.collection('reference_folders')
+    const coll = db.collection<any>('reference_folders')
     const nowIso = new Date().toISOString()
 
     // 去重：同一用户同名目录只保留一个
@@ -196,8 +196,8 @@ export async function PATCH(req: Request) {
     }
 
     const db = await getDb()
-    const imgColl = db.collection('reference_images')
-    const folderColl = db.collection('reference_folders')
+    const imgColl = db.collection<any>('reference_images')
+    const folderColl = db.collection<any>('reference_folders')
 
     // 参考图：将 label = from 的全部改为 to
     const relabel = await imgColl.updateMany({ user_id, label: from }, { $set: { label: to } })
@@ -236,13 +236,16 @@ export async function DELETE(req: Request) {
     }
 
     const db = await getDb()
-    const imgColl = db.collection('reference_images')
-    const folderColl = db.collection('reference_folders')
+    const imgColl = db.collection<any>('reference_images')
+    const folderColl = db.collection<any>('reference_folders')
 
     // 1) 清空主标签 label
     const clearMain = await imgColl.updateMany({ user_id, label: folderLabel }, { $set: { label: null } })
     // 2) 从多标签数组 labels 中移除该目录标签
-    const pullFromLabels = await imgColl.updateMany({ user_id, labels: folderLabel }, { $pull: { labels: folderLabel } })
+    const pullFromLabels = await imgColl.updateMany(
+      { user_id, labels: folderLabel },
+      { $pull: { labels: folderLabel } } as any
+    )
     // 3) 删除显式目录记录
     const del = await folderColl.deleteOne({ user_id, name: folderLabel })
 
