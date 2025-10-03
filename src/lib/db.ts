@@ -1,6 +1,6 @@
 import { supabase, isDemoMode } from './supabase'
 import { getCurrentUser } from './auth'
-import { Project, Script, ScriptSegment, GeneratedImage, ReferenceImage, ApiKeySettings, GeneratedVideo, ReferenceVideo } from './types'
+import { Project, Script, ScriptSegment, GeneratedImage, ReferenceImage, ApiKeySettings, GeneratedVideo, ReferenceVideo, ReferenceFolder } from './types'
 
 // Demo mode data storage
 const demoProjects: Project[] = [
@@ -56,6 +56,7 @@ let demoApiKeySettings: ApiKeySettings = {
   updated_at: new Date().toISOString()
 }
 const demoVideos: GeneratedVideo[] = []
+let demoReferenceFolders: ReferenceFolder[] = []
 
 // 项目相关操作
 export async function createProject(name: string, description: string): Promise<Project> {
@@ -396,6 +397,7 @@ export async function addReferenceImage(url: string, label?: string): Promise<Re
       user_id: user.id,
       url,
       label,
+      labels: typeof label === 'string' && label.trim() ? [label.trim()] : [],
       created_at: new Date().toISOString()
     }
     demoReferenceImages.unshift(image)
@@ -458,6 +460,47 @@ export async function getReferenceImages(limit = 10, before?: string): Promise<R
     return items
   } catch (error) {
     console.error('Failed to load reference images via API', error)
+    return []
+  }
+}
+
+// 按目录（label）读取参考图；labelKey 为 '__none__' 表示未归类
+export async function getReferenceImagesByLabel(labelKey: string | null, limit = 10, before?: string): Promise<ReferenceImage[]> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    const mine = demoReferenceImages.filter(img => img.user_id === user.id)
+    const filtered = mine.filter(img => {
+      const labels = Array.isArray((img as any).labels) ? (img as any).labels : []
+      if (labelKey === '__none__' || labelKey === null) {
+        return (!img.label && labels.length === 0)
+      }
+      return img.label === labelKey || labels.includes(String(labelKey))
+    })
+    const sorted = [...filtered].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    if (before) {
+      return sorted.filter(img => new Date(img.created_at).getTime() < new Date(before).getTime()).slice(0, limit)
+    }
+    return sorted.slice(0, limit)
+  }
+
+  try {
+    const params = new URLSearchParams({ user_id: user.id, limit: String(limit) })
+    if (before) params.set('before', before)
+    if (labelKey === '__none__' || labelKey === null) params.set('label', '__none__')
+    else if (typeof labelKey === 'string') params.set('label', labelKey)
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-images?${params.toString()}`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.error('API:get reference_images by label failed', err)
+      return []
+    }
+    const data = await res.json()
+    const items = (data.items as ReferenceImage[]) || []
+    return items
+  } catch (error) {
+    console.error('Failed to load reference images by label via API', error)
     return []
   }
 }
@@ -741,13 +784,14 @@ export async function updateProjectName(projectId: string, name: string): Promis
   }
 }
 
-export async function updateReferenceImageLabel(id: string, label: string): Promise<ReferenceImage> {
+export async function updateReferenceImageLabel(id: string, label: string | null): Promise<ReferenceImage> {
   const user = getCurrentUser()
 
   if (isDemoMode) {
     const idx = demoReferenceImages.findIndex(img => img.id === id && img.user_id === user.id)
     if (idx >= 0) {
-      demoReferenceImages[idx] = { ...demoReferenceImages[idx], label }
+      const trimmed = typeof label === 'string' ? label.trim() : null
+      demoReferenceImages[idx] = { ...demoReferenceImages[idx], label: trimmed ?? null, labels: trimmed ? [trimmed] : [] }
       invalidateRefCaches(user.id)
       return demoReferenceImages[idx]
     }
@@ -770,6 +814,264 @@ export async function updateReferenceImageLabel(id: string, label: string): Prom
     return data.item as ReferenceImage
   } catch (error) {
     console.error('Failed to update reference image via API', error)
+    throw error
+  }
+}
+
+// 参考图：添加一个目录标签（多目录归档）
+export async function addReferenceImageLabel(id: string, label: string): Promise<ReferenceImage> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    const idx = demoReferenceImages.findIndex(img => img.id === id && img.user_id === user.id)
+    if (idx >= 0) {
+      const labels = Array.isArray((demoReferenceImages[idx] as any).labels) ? (demoReferenceImages[idx] as any).labels : []
+      const trimmed = label.trim()
+      const nextLabels = labels.includes(trimmed) ? labels : [...labels, trimmed]
+      demoReferenceImages[idx] = { ...demoReferenceImages[idx], labels: nextLabels }
+      invalidateRefCaches(user.id)
+      return demoReferenceImages[idx]
+    }
+    throw new Error('Reference image not found in demo mode')
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-images`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, label, user_id: user.id, op: 'add' })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to add reference image label (HTTP ${res.status})`)
+    }
+    const data = await res.json()
+    invalidateRefCaches(user.id)
+    return data.item as ReferenceImage
+  } catch (error) {
+    console.error('Failed to add reference image label via API', error)
+    throw error
+  }
+}
+
+// 参考图：移除一个目录标签
+export async function removeReferenceImageLabel(id: string, label: string): Promise<ReferenceImage> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    const idx = demoReferenceImages.findIndex(img => img.id === id && img.user_id === user.id)
+    if (idx >= 0) {
+      const labels = Array.isArray((demoReferenceImages[idx] as any).labels) ? (demoReferenceImages[idx] as any).labels : []
+      const trimmed = label.trim()
+      const nextLabels = labels.filter(l => l !== trimmed)
+      demoReferenceImages[idx] = { ...demoReferenceImages[idx], labels: nextLabels }
+      invalidateRefCaches(user.id)
+      return demoReferenceImages[idx]
+    }
+    throw new Error('Reference image not found in demo mode')
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-images`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, label, user_id: user.id, op: 'remove' })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to remove reference image label (HTTP ${res.status})`)
+    }
+    const data = await res.json()
+    invalidateRefCaches(user.id)
+    return data.item as ReferenceImage
+  } catch (error) {
+    console.error('Failed to remove reference image label via API', error)
+    throw error
+  }
+}
+
+// 目录：创建显式目录（用于空目录展示）
+export async function addReferenceFolder(name: string): Promise<ReferenceFolder> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    const exist = demoReferenceFolders.find(f => f.user_id === user.id && f.name === name)
+    if (exist) return exist
+    const folder: ReferenceFolder = {
+      id: `demo_folder_${Date.now()}`,
+      user_id: user.id,
+      name,
+      label: name,
+      created_at: new Date().toISOString(),
+      cover_url: null,
+      count: 0
+    }
+    demoReferenceFolders.unshift(folder)
+    return folder
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-folders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, user_id: user.id })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to add reference folder (HTTP ${res.status})`)
+    }
+    const data = await res.json()
+    return data.item as ReferenceFolder
+  } catch (error) {
+    console.error('Failed to add reference folder via API', error)
+    throw error
+  }
+}
+
+// 目录：分页列出（聚合标签 + 显式目录）
+export async function getReferenceFolders(limit = 10, before?: string): Promise<ReferenceFolder[]> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    // 聚合 demoReferenceImages 的 labels/label 生成目录项，并与显式目录合并
+    const labelsMap = new Map<string, { latest: string; cover_url: string | null; count: number }>()
+    const mine = demoReferenceImages.filter(img => img.user_id === user.id)
+    const sorted = [...mine].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    for (const img of sorted) {
+      const labels = Array.isArray((img as any).labels) ? (img as any).labels : []
+      const merged = labels.length ? labels : (img.label ? [img.label] : [])
+      if (merged.length === 0) {
+        const key = '__none__'
+        if (!labelsMap.has(key)) labelsMap.set(key, { latest: img.created_at, cover_url: img.url, count: 1 })
+        else labelsMap.get(key)!.count += 1
+      } else {
+        for (const lab of merged) {
+          if (!labelsMap.has(lab)) labelsMap.set(lab, { latest: img.created_at, cover_url: img.url, count: 1 })
+          else labelsMap.get(lab)!.count += 1
+        }
+      }
+    }
+    const aggItems: ReferenceFolder[] = Array.from(labelsMap.entries()).map(([key, v]) => ({
+      id: key === '__none__' ? 'uncategorized' : `label:${key}`,
+      user_id: user.id,
+      name: key === '__none__' ? '未归类' : key,
+      label: key === '__none__' ? null : key,
+      created_at: v.latest,
+      cover_url: v.cover_url,
+      count: v.count
+    }))
+    const explicit = demoReferenceFolders.filter(f => f.user_id === user.id)
+    const byName = new Map<string, ReferenceFolder>()
+    // 计算显式目录的图片数量，并过滤空目录（等同自动删除不展示）
+    const explicitWithCounts = explicit
+      .map(f => ({
+        ...f,
+        count: demoReferenceImages.filter(img => img.user_id === user.id && img.label === f.name).length,
+        cover_url:
+          (() => {
+            const latest = demoReferenceImages
+              .filter(img => img.user_id === user.id && img.label === f.name)
+              .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0]
+            return latest ? latest.url : f.cover_url ?? null
+          })()
+      }))
+      .filter(f => (f.count ?? 0) > 0)
+    for (const item of [...aggItems, ...explicitWithCounts]) {
+      if (!byName.has(item.name)) {
+        byName.set(item.name, item)
+      }
+    }
+    let items = Array.from(byName.values())
+    if (before) items = items.filter(i => new Date(i.created_at).getTime() < new Date(before).getTime())
+    items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    return items.slice(0, limit)
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const params = new URLSearchParams({ user_id: user.id, limit: String(limit) })
+    if (before) params.set('before', before)
+    const res = await fetch(`${baseOrigin}/api/reference-folders?${params.toString()}`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.error('API:get reference-folders failed', err)
+      return []
+    }
+    const data = await res.json()
+    return (data.items as ReferenceFolder[]) || []
+  } catch (error) {
+    console.error('Failed to load reference folders via API', error)
+    return []
+  }
+}
+
+// 目录：删除并将目录内参考图置为未归类
+export async function deleteReferenceFolder(name: string): Promise<void> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    // 参考图置为未归类
+    demoReferenceImages = demoReferenceImages.map(img => (img.user_id === user.id && img.label === name ? { ...img, label: null } : img))
+    // 删除显式目录记录
+    demoReferenceFolders = demoReferenceFolders.filter(f => !(f.user_id === user.id && f.name === name))
+    return
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-folders`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, user_id: user.id })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to delete reference folder (HTTP ${res.status})`)
+    }
+    await res.json().catch(() => null)
+  } catch (error) {
+    console.error('Failed to delete reference folder via API', error)
+    throw error
+  }
+}
+
+// 目录：重命名，并将目录内参考图的 label 一并修改
+export async function renameReferenceFolder(oldName: string, newName: string): Promise<void> {
+  const user = getCurrentUser()
+
+  if (isDemoMode) {
+    const from = (oldName || '').trim()
+    const to = (newName || '').trim()
+    if (!from || !to) return
+    // 更新参考图
+    demoReferenceImages = demoReferenceImages.map(img => (img.user_id === user.id && img.label === from ? { ...img, label: to } : img))
+    // 显式目录：若存在新名则删除旧；否则重命名旧
+    const exists = demoReferenceFolders.some(f => f.user_id === user.id && f.name === to)
+    if (exists) {
+      demoReferenceFolders = demoReferenceFolders.filter(f => !(f.user_id === user.id && f.name === from))
+    } else {
+      demoReferenceFolders = demoReferenceFolders.map(f => (f.user_id === user.id && f.name === from ? { ...f, name: to } : f))
+    }
+    return
+  }
+
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/reference-folders`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_name: oldName, new_name: newName, user_id: user.id })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      throw new Error(err?.error || `Failed to rename folder (HTTP ${res.status})`)
+    }
+    await res.json().catch(() => null)
+  } catch (error) {
+    console.error('Failed to rename reference folder via API', error)
     throw error
   }
 }

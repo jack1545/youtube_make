@@ -3,8 +3,8 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { generateBatchImages } from '@/lib/doubao'
 import { createVeo3Job } from '@/lib/veo3'
-import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject, updateReferenceImageLabel, updateScript, updateGeneratedImage, addReferenceVideo, getReferenceVideos, removeReferenceVideo } from '@/lib/db'
-import type { ReferenceImage, ScriptSegment as DbScriptSegment, Project, Script, GeneratedImage, GeneratedVideo, ReferenceVideo } from '@/lib/types'
+import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject, updateReferenceImageLabel, addReferenceImageLabel, removeReferenceImageLabel, updateScript, updateGeneratedImage, addReferenceVideo, getReferenceVideos, removeReferenceVideo, addReferenceFolder, getReferenceFolders, getReferenceImagesByLabel, deleteReferenceFolder, renameReferenceFolder } from '@/lib/db'
+import type { ReferenceImage, ScriptSegment as DbScriptSegment, Project, Script, GeneratedImage, GeneratedVideo, ReferenceVideo, ReferenceFolder } from '@/lib/types'
 import { supabase, isDemoMode } from '@/lib/supabase'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -769,6 +769,38 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [isLoadingRefs, setIsLoadingRefs] = useState<boolean>(false)
   const [isLoadingMoreRefs, setIsLoadingMoreRefs] = useState<boolean>(false)
 
+  // 参考图目录分页状态
+  const [folders, setFolders] = useState<{ id: string; name: string; label: string | null; cover_url: string | null; count?: number; created_at: string }[]>([])
+  const [folderCursor, setFolderCursor] = useState<string | null>(null)
+  const [folderHasMore, setFolderHasMore] = useState<boolean>(true)
+  const [isLoadingFolders, setIsLoadingFolders] = useState<boolean>(false)
+  const [isLoadingMoreFolders, setIsLoadingMoreFolders] = useState<boolean>(false)
+  const [newFolderName, setNewFolderName] = useState('')
+  // 目录重命名编辑状态
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null)
+  const [editingFolderName, setEditingFolderName] = useState<string>('')
+  // 当前选中的目录（null 表示未归类）
+  const [selectedFolderLabel, setSelectedFolderLabel] = useState<string | null>(null)
+
+  const handleAddFolder = useCallback(async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    const name = newFolderName.trim()
+    if (!name) return
+    try {
+      const folder = await addReferenceFolder(name)
+      setFolders(prev => {
+        // 去重：按 name
+        if (prev.some(f => f.name === folder.name)) return prev
+        return [folder, ...prev]
+      })
+      setNewFolderName('')
+      setStatus({ type: 'success', text: '目录已创建。' })
+    } catch (err: any) {
+      console.error('创建目录失败', err)
+      setStatus({ type: 'error', text: err?.message || '创建目录失败' })
+    }
+  }, [newFolderName])
+
   // 当 referenceImages 变化时，将其中的 data:URL 转换为 blob: URL，以稳定渲染
   useEffect(() => {
     let isCancelled = false
@@ -968,7 +1000,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     if (isLoadingMoreRefs || !refHasMore) return
     setIsLoadingMoreRefs(true)
     try {
-      const items = await getReferenceImages(10, refCursor ?? undefined)
+      const items = await getReferenceImagesByLabel(selectedFolderLabel ?? '__none__', 10, refCursor ?? undefined)
       const dedup = items.filter(item => !referenceImages.some(exist => exist.id === item.id))
       const next = [...referenceImages, ...dedup]
       setReferenceImages(next)
@@ -984,7 +1016,65 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     } finally {
       setIsLoadingMoreRefs(false)
     }
-  }, [isLoadingMoreRefs, refHasMore, refCursor, referenceImages])
+  }, [isLoadingMoreRefs, refHasMore, refCursor, referenceImages, selectedFolderLabel])
+
+  // 刷新目录列表（用于拖拽归类或删除目录后更新视图）
+  const reloadFolders = useCallback(async () => {
+    try {
+      setIsLoadingFolders(true)
+      const items = await getReferenceFolders(10)
+      setFolders(items)
+      const last = items.length ? items[items.length - 1] : null
+      setFolderCursor(last?.created_at ?? null)
+      setFolderHasMore(items.length >= 10)
+    } catch (error) {
+      console.error('Failed to reload folders', error)
+      setStatus({ type: 'error', text: '刷新目录失败。' })
+    } finally {
+      setIsLoadingFolders(false)
+    }
+  }, [])
+
+  // 全部参考图（用于“参考图模块”拖拽归类）
+  const [allRefImages, setAllRefImages] = useState<ReferenceImage[]>([])
+  const [allRefCursor, setAllRefCursor] = useState<string | null>(null)
+  const [allRefHasMore, setAllRefHasMore] = useState<boolean>(true)
+  const [isLoadingMoreAllRefs, setIsLoadingMoreAllRefs] = useState<boolean>(false)
+
+  useEffect(() => {
+    const loadInitial = async () => {
+      try {
+        const items = await getReferenceImages(10)
+        setAllRefImages(items)
+        const lastCreatedAt = items.length ? items[items.length - 1].created_at : null
+        setAllRefCursor(lastCreatedAt)
+        setAllRefHasMore(items.length >= 10)
+      } catch (error) {
+        console.error('加载参考图模块失败', error)
+        setStatus({ type: 'error', text: '加载参考图模块失败。' })
+      }
+    }
+    loadInitial()
+  }, [])
+
+  const loadMoreAllReferences = useCallback(async () => {
+    if (isLoadingMoreAllRefs || !allRefHasMore) return
+    setIsLoadingMoreAllRefs(true)
+    try {
+      const items = await getReferenceImages(10, allRefCursor ?? undefined)
+      const dedup = items.filter(item => !allRefImages.some(exist => exist.id === item.id))
+      const next = [...allRefImages, ...dedup]
+      setAllRefImages(next)
+      const lastCreatedAt = items.length ? items[items.length - 1].created_at : allRefCursor
+      setAllRefCursor(lastCreatedAt ?? null)
+      setAllRefHasMore(items.length >= 10)
+    } catch (error) {
+      console.error('加载更多参考图模块失败', error)
+      setStatus({ type: 'error', text: '加载更多参考图失败。' })
+    } finally {
+      setIsLoadingMoreAllRefs(false)
+    }
+  }, [isLoadingMoreAllRefs, allRefHasMore, allRefCursor, allRefImages])
 
   useEffect(() => {
     if (doubaoSizeMode !== 'custom') {
@@ -1007,35 +1097,76 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     }
   }, [doubaoSizeMode])
 
+  // 首次加载目录列表，并默认选中第一个显式目录（不再显示未归类）
   useEffect(() => {
-    const loadReferences = async () => {
+    const loadFoldersOnce = async () => {
+      setIsLoadingFolders(true)
+      try {
+        const first = await getReferenceFolders(10)
+        setFolders(first)
+        const before = first.length ? first[first.length - 1].created_at : null
+        setFolderCursor(before)
+        setFolderHasMore(first.length >= 10)
+        // 默认选中第一个有标签的目录
+        const initialLabel = first.find(f => f.label != null)?.label ?? null
+        setSelectedFolderLabel(initialLabel)
+      } catch (error) {
+        console.error('Failed to load reference folders', error)
+        setStatus({ type: 'error', text: '加载参考图目录失败。' })
+      } finally {
+        setIsLoadingFolders(false)
+      }
+    }
+    loadFoldersOnce()
+  }, [])
+
+  // 当选择目录变化时，加载该目录下参考图（不再支持未归类）
+  useEffect(() => {
+    const loadReferencesByFolder = async () => {
       setIsLoadingRefs(true)
       try {
-        const limit = 50
-        const first = await getReferenceImages(limit)
-        let all = [...first]
-        let before = first.length ? first[first.length - 1].created_at : null
-        // 默认尽可能加载全部参考图（分批 50 条）
-        while (before && first.length === limit) {
-          const next = await getReferenceImages(limit, before)
-          if (!next.length) break
-          all = [...all, ...next]
-          before = next[next.length - 1].created_at
-          if (next.length < limit) break
+        const limit = 10
+        if (!selectedFolderLabel) {
+          setReferenceImages([])
+          setSelectedReferenceIds(prev => [])
+          setRefCursor(null)
+          setRefHasMore(false)
+          return
         }
-        setReferenceImages(all)
-        setSelectedReferenceIds(prev => prev.filter(id => all.some(item => item.id === id)))
+        const first = await getReferenceImagesByLabel(selectedFolderLabel, limit)
+        setReferenceImages(first)
+        setSelectedReferenceIds(prev => prev.filter(id => first.some(item => item.id === id)))
+        const before = first.length ? first[first.length - 1].created_at : null
         setRefCursor(before)
-        setRefHasMore(false)
+        setRefHasMore(first.length >= limit)
       } catch (error) {
-        console.error('Failed to load reference images', error)
-        setStatus({ type: 'error', text: 'Failed to load reference images.' })
+        console.error('Failed to load reference images by folder', error)
+        setStatus({ type: 'error', text: '加载目录下参考图失败。' })
       } finally {
         setIsLoadingRefs(false)
       }
     }
-    loadReferences()
-  }, [])
+    loadReferencesByFolder()
+  }, [selectedFolderLabel])
+
+  const loadMoreFolders = useCallback(async () => {
+    if (isLoadingMoreFolders || !folderHasMore) return
+    setIsLoadingMoreFolders(true)
+    try {
+      const items = await getReferenceFolders(10, folderCursor ?? undefined)
+      const dedup = items.filter(item => !folders.some(exist => exist.name === item.name))
+      const next = [...folders, ...dedup]
+      setFolders(next)
+      const lastCreatedAt = items.length > 0 ? items[items.length - 1].created_at : folderCursor
+      setFolderCursor(lastCreatedAt ?? null)
+      if (items.length < 10) setFolderHasMore(false)
+    } catch (error) {
+      console.error('Failed to load more folders', error)
+      setStatus({ type: 'error', text: '加载更多目录失败。' })
+    } finally {
+      setIsLoadingMoreFolders(false)
+    }
+  }, [isLoadingMoreFolders, folderHasMore, folderCursor, folders])
 
   // 加载历史项目列表
   useEffect(() => {
@@ -1618,11 +1749,16 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
 
     setIsAddingReference(true)
     try {
-      const image = await addReferenceImage(newReferenceUrl.trim(), newReferenceLabel.trim() || undefined)
+      const effectiveLabel = (selectedFolderLabel && selectedFolderLabel !== '__none__')
+        ? selectedFolderLabel
+        : (newReferenceLabel.trim() || undefined)
+      const image = await addReferenceImage(newReferenceUrl.trim(), effectiveLabel)
       setReferenceImages(prev => [image, ...prev])
       setSelectedReferenceIds(prev => [image.id, ...prev])
+      setAllRefImages(prev => [image, ...(prev || [])])
       setNewReferenceUrl('')
       setNewReferenceLabel('')
+      await reloadFolders()
       setStatus({ type: 'success', text: 'Reference image added.' })
     } catch (error) {
       console.error('Failed to add reference image', error)
@@ -1630,7 +1766,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     } finally {
       setIsAddingReference(false)
     }
-  }, [newReferenceUrl, newReferenceLabel])
+  }, [newReferenceUrl, newReferenceLabel, selectedFolderLabel, reloadFolders])
 
   const handleRemoveReferenceImage = useCallback(async (id: string) => {
     try {
@@ -1683,11 +1819,16 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         finalUrl = await fileToDataUrl(file)
         usedDataUrlFallback = true
       }
-      const image = await addReferenceImage(finalUrl, newReferenceLabel.trim() || undefined)
+      const effectiveLabel = (selectedFolderLabel && selectedFolderLabel !== '__none__')
+        ? selectedFolderLabel
+        : (newReferenceLabel.trim() || undefined)
+      const image = await addReferenceImage(finalUrl, effectiveLabel)
       setReferenceImages(prev => [image, ...prev])
       setSelectedReferenceIds(prev => [image.id, ...prev])
+      setAllRefImages(prev => [image, ...(prev || [])])
       setNewReferenceFile(null)
       setNewReferenceLabel('')
+      await reloadFolders()
       setStatus({ type: 'success', text: usedDataUrlFallback ? '参考图已上传（使用本地 Data URL）。' : '参考图已上传。' })
     } catch (error) {
       console.error('Failed to upload reference image', error)
@@ -1695,7 +1836,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     } finally {
       setIsUploadingReference(false)
     }
-  }, [newReferenceFile, newReferenceLabel])
+  }, [newReferenceFile, newReferenceLabel, selectedFolderLabel, reloadFolders])
 
   const toggleReferenceSelection = useCallback((id: string) => {
     setSelectedReferenceIds(prev => (prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]))
@@ -2285,7 +2426,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                         type="button"
                         onClick={() => toggleReferenceSelection(image.id)}
                         className={`group relative flex items-center gap-2 rounded border px-2 py-1 text-xs ${isSelected ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600'}`}
-                        title={image.label ?? image.url}
+                        title={image.label ?? ''}
                       >
                         <span className="relative h-8 w-8 overflow-hidden rounded bg-gray-100">
                           <img
@@ -2311,9 +2452,11 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                             </span>
                           )}
                         </span>
-                        <span className="max-w-[160px] truncate text-left">
-                          {image.label ?? image.url}
-                        </span>
+                        {image.label && (
+                          <span className="max-w-[160px] truncate text-left">
+                            {image.label}
+                          </span>
+                        )}
                       </button>
                     )
                   })}
@@ -2422,26 +2565,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               </div>
             )}
           </div>
-          {/* 独立悬浮的批量生成按钮：位于“Bulk replace”按钮下方，不在其内容内 */}
-          <div className="mt-2 flex flex-col items-end gap-2">
-            <button
-              type="button"
-              onClick={handleGenerateImages}
-              disabled={isGeneratingImages || !isDoubaoSizeValid}
-              className="rounded-md bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isGeneratingImages ? `Generating ${imageProgress}%` : 'Generate images'}
-            </button>
-            <button
-              type="button"
-              onClick={handleBulkDownloadImages}
-              disabled={isDownloadingImages || Object.keys(imageResults).length === 0}
-              className="ml-2 rounded-md bg-blue-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-              title="下载已生成的图片（按分镜号命名）"
-            >
-              {isDownloadingImages ? 'Downloading...' : `Download images (${Object.keys(imageResults).length})`}
-            </button>
-          </div>
+          {/* 右侧悬浮按钮容器已添加，这里移除内联按钮 */}
         </div>
       )}
 
@@ -2452,6 +2576,27 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         <a href="#step-3" className="block w-full rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 3 设置图片</a>
         <a href="#step-4" className="block w-full rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 4 生成视频</a>
       </nav>
+
+      {/* 右侧悬浮操作按钮（生成与下载） */}
+      <div className="fixed right-4 top-24 z-40 hidden md:flex md:flex-col md:gap-3">
+        <button
+          type="button"
+          onClick={handleGenerateImages}
+          disabled={isGeneratingImages || !isDoubaoSizeValid}
+          className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {isGeneratingImages ? `Generating ${imageProgress}%` : 'Generate images'}
+        </button>
+        <button
+          type="button"
+          onClick={handleBulkDownloadImages}
+          disabled={isDownloadingImages || Object.keys(imageResults).length === 0}
+          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+          title="下载已生成的图片（按分镜号命名）"
+        >
+          {isDownloadingImages ? 'Downloading...' : `Download images (${Object.keys(imageResults).length})`}
+        </button>
+      </div>
 
       {status && (
         <div
@@ -3828,16 +3973,238 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               </div>
             )}
 
-            <div className="space-y-3 rounded-md border border-gray-200 bg-white p-4">
-              <div className="flex flex-col gap-1">
-                <h3 className="text-sm font-semibold text-gray-800">Reference images</h3>
-                <p className="text-xs text-gray-500">
-                  Selected references are cycled when generating Doubao images.
-                </p>
-                <p className="text-xs text-gray-500">
-                  Selected: {selectedReferenceImages.length}
-                </p>
-              </div>
+              <div className="space-y-3 rounded-md border border-gray-200 bg-white p-4">
+                <div className="flex flex-col gap-1">
+                  <h3 className="text-sm font-semibold text-gray-800">Reference images</h3>
+                  <p className="text-xs text-gray-500">
+                    Selected references are cycled when generating Doubao images.
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Selected: {selectedReferenceImages.length}
+                  </p>
+                </div>
+
+                {/* 参考图目录区块 */}
+                <div className="space-y-2 rounded-md border border-gray-100 bg-gray-50 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-700">Folders</span>
+                    <button
+                      type="button"
+                      onClick={loadMoreFolders}
+                      disabled={isLoadingMoreFolders || !folderHasMore}
+                      className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isLoadingMoreFolders ? 'Loading…' : folderHasMore ? 'Load more' : 'No more'}
+                    </button>
+                  </div>
+
+                  {/* 新建目录 */}
+                  <form onSubmit={handleAddFolder} className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newFolderName}
+                      onChange={e => setNewFolderName(e.target.value)}
+                      className="flex-1 rounded-md border border-gray-300 px-2 py-1 text-sm"
+                      placeholder="新建目录名称"
+                    />
+                    <button
+                      type="submit"
+                      className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                    >
+                      新建目录
+                    </button>
+                  </form>
+
+                  {/* 目录网格（放大样式并隐藏“未归类”） */}
+                  <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+                    {folders.filter(f => f.label != null).map(folder => {
+                      const isActive = (folder.label ?? null) === (selectedFolderLabel ?? null)
+                      return (
+                        <button
+                          key={folder.id}
+                          type="button"
+                          title={folder.name}
+                          onClick={() => setSelectedFolderLabel(folder.label ?? null)}
+                          onDragOver={e => {
+                            e.preventDefault()
+                          }}
+                          onDrop={async e => {
+                            e.preventDefault()
+                            const refId = e.dataTransfer.getData('ref-id')
+                            if (!refId) return
+                            try {
+                              let updated: ReferenceImage | null = null
+                              if (folder.label) {
+                                // 添加标签到目标目录，实现多目录归属
+                                updated = await addReferenceImageLabel(refId, folder.label)
+                                setStatus({ type: 'success', text: '已添加标签到目录。' })
+                              } else {
+                                // 未归类：从当前目录移除标签（如果当前视图是具体目录）
+                                if (selectedFolderLabel) {
+                                  updated = await removeReferenceImageLabel(refId, selectedFolderLabel)
+                                  setStatus({ type: 'success', text: '已从当前目录移除标签。' })
+                                } else {
+                                  setStatus({ type: 'info', text: '已在未归类目录，无需变更。' })
+                                }
+                              }
+                              if (updated) {
+                                setReferenceImages(prev => {
+                                  const lbl = selectedFolderLabel ?? null
+                                  const labels = Array.from(new Set([updated!.label, ...(updated!.labels ?? [])].filter(Boolean)))
+                                  const stillMatches = lbl === null
+                                    ? !((updated!.labels && updated!.labels.length > 0) || Boolean(updated!.label))
+                                    : labels.includes(lbl)
+                                  const exists = prev.some(it => it.id === refId)
+                                  const next = exists
+                                    ? prev.map(it => (it.id === refId ? updated! : it))
+                                    : [updated!, ...prev]
+                                  return stillMatches ? next : prev.filter(it => it.id !== refId)
+                                })
+                              }
+                            } catch (err: any) {
+                              console.error('拖拽归类失败', err)
+                              setStatus({ type: 'error', text: err?.message || '拖拽归类失败' })
+                            }
+                          }}
+                          className={`group flex items-center gap-3 rounded border px-3 py-3 text-left text-sm transition ${
+                            isActive ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                          }`}
+                        >
+                          <span className="h-10 w-10 overflow-hidden rounded bg-gray-100" title={folder.name}>
+                            {folder.cover_url ? (
+                              <img
+                                src={folder.cover_url}
+                                alt={folder.name}
+                                loading="lazy"
+                                referrerPolicy="no-referrer"
+                                onError={e => {
+                                  const img = e.currentTarget as HTMLImageElement
+                                  img.src = '/file.svg'
+                                  img.classList.remove('object-cover')
+                                  img.classList.add('object-contain')
+                                }}
+                                className="h-full w-full object-cover"
+                              />
+                            ) : (
+                              <img src="/file.svg" alt="folder" className="h-full w-full object-contain" />
+                            )}
+                          </span>
+                          {editingFolderId === folder.id ? (
+                            <form
+                              onSubmit={async (e) => {
+                                e.preventDefault()
+                                const nextName = editingFolderName.trim()
+                                if (!nextName || nextName === folder.name) {
+                                  setEditingFolderId(null)
+                                  return
+                                }
+                                try {
+                                  await renameReferenceFolder(folder.name, nextName)
+                                  // 若重命名的是当前选中目录，更新选中标签
+                                  setSelectedFolderLabel(prev => (prev === (folder.name ?? null) ? nextName : prev))
+                                  await reloadFolders()
+                                  setEditingFolderId(null)
+                                  setStatus({ type: 'success', text: '目录已重命名。' })
+                                } catch (err: any) {
+                                  console.error('重命名目录失败', err)
+                                  setStatus({ type: 'error', text: err?.message || '重命名目录失败' })
+                                }
+                              }}
+                              className="flex-1"
+                            >
+                              <input
+                                type="text"
+                                value={editingFolderName}
+                                onChange={(e) => setEditingFolderName(e.target.value)}
+                                onBlur={async () => {
+                                  const nextName = editingFolderName.trim()
+                                  if (!nextName || nextName === folder.name) {
+                                    setEditingFolderId(null)
+                                    return
+                                  }
+                                  try {
+                                    await renameReferenceFolder(folder.name, nextName)
+                                    setSelectedFolderLabel(prev => (prev === (folder.name ?? null) ? nextName : prev))
+                                    await reloadFolders()
+                                    setEditingFolderId(null)
+                                    setStatus({ type: 'success', text: '目录已重命名。' })
+                                  } catch (err: any) {
+                                    console.error('重命名目录失败', err)
+                                    setStatus({ type: 'error', text: err?.message || '重命名目录失败' })
+                                  }
+                                }}
+                                className="w-full rounded border border-gray-300 px-1 py-0.5 text-xs"
+                                autoFocus
+                              />
+                            </form>
+                          ) : (
+                            <span className="flex-1 truncate">{folder.name}</span>
+                          )}
+                          {typeof folder.count === 'number' && (
+                            <span className="rounded bg-gray-100 px-2 text-xs text-gray-600">{folder.count}</span>
+                          )}
+                          {folder.label != null && (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              title="删除目录"
+                              onClick={async (e) => {
+                                e.stopPropagation()
+                                try {
+                                  await deleteReferenceFolder(folder.name)
+                                  setSelectedFolderLabel(prev => {
+                                    if (prev === (folder.name ?? null)) {
+                                      const next = folders.filter(f => f.label != null && f.label !== folder.label)[0]?.label ?? null
+                                      return next
+                                    }
+                                    return prev
+                                  })
+                                  await reloadFolders()
+                                  setStatus({ type: 'success', text: '目录已删除。' })
+                                } catch (err: any) {
+                                  console.error('删除目录失败', err)
+                                  setStatus({ type: 'error', text: err?.message || '删除目录失败' })
+                                }
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                  ;(e.currentTarget as HTMLElement).click()
+                                }
+                              }}
+                              className="ml-1 cursor-pointer rounded border border-red-300 px-1 py-0.5 text-[10px] text-red-600 hover:bg-red-50"
+                            >
+                              删除
+                            </span>
+                          )}
+                          {folder.label != null && editingFolderId !== folder.id && (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              title="重命名目录"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setEditingFolderId(folder.id)
+                                setEditingFolderName(folder.name)
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                  ;(e.currentTarget as HTMLElement).click()
+                                }
+                              }}
+                              className="ml-1 cursor-pointer rounded border border-gray-300 px-1 py-0.5 text-[10px] text-gray-700 hover:bg-gray-100"
+                            >
+                              重命名
+                            </span>
+                          )}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
               <form onSubmit={handleAddReferenceImage} className="grid gap-3 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_auto]">
                 <input
                   type="url"
@@ -3856,11 +4223,16 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                           if (file) {
                             event.preventDefault()
                             const dataUrl = await fileToDataUrl(file)
-                            const image = await addReferenceImage(dataUrl, newReferenceLabel.trim() || undefined)
+                            const effectiveLabel = (selectedFolderLabel && selectedFolderLabel !== '__none__')
+                              ? selectedFolderLabel
+                              : (newReferenceLabel.trim() || undefined)
+                            const image = await addReferenceImage(dataUrl, effectiveLabel)
                             setReferenceImages(prev => [image, ...prev])
                             setSelectedReferenceIds(prev => [image.id, ...prev])
+                            setAllRefImages(prev => [image, ...(prev || [])])
                             setNewReferenceUrl('')
                             setNewReferenceLabel('')
+                            await reloadFolders()
                             setStatus({ type: 'success', text: '已从剪贴板图片添加参考图。' })
                             return
                           }
@@ -3870,11 +4242,16 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                       const text = dt.getData('text')?.trim()
                       if (text && (/^https?:\/\/\S+/.test(text) || /^data:image\//i.test(text))) {
                         event.preventDefault()
-                        const image = await addReferenceImage(text, newReferenceLabel.trim() || undefined)
+                        const effectiveLabel = (selectedFolderLabel && selectedFolderLabel !== '__none__')
+                          ? selectedFolderLabel
+                          : (newReferenceLabel.trim() || undefined)
+                        const image = await addReferenceImage(text, effectiveLabel)
                         setReferenceImages(prev => [image, ...prev])
                         setSelectedReferenceIds(prev => [image.id, ...prev])
+                        setAllRefImages(prev => [image, ...(prev || [])])
                         setNewReferenceUrl('')
                         setNewReferenceLabel('')
+                        await reloadFolders()
                         setStatus({ type: 'success', text: '已从剪贴板文本添加参考图。' })
                         return
                       }
@@ -3924,7 +4301,40 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                   {isUploadingReference ? 'Uploading…' : 'Upload local image'}
                 </button>
               </form>
-              <div className="flex flex-wrap gap-2">
+              <div
+                className="flex flex-wrap gap-2"
+                onDragOver={e => {
+                  // 允许拖拽悬停到目录视图容器
+                  e.preventDefault()
+                }}
+                onDrop={async e => {
+                  e.preventDefault()
+                  const refId = e.dataTransfer.getData('ref-id')
+                  if (!refId) return
+                  try {
+                    const currentLabel = selectedFolderLabel ?? null
+                    if (!currentLabel) {
+                      setStatus({ type: 'info', text: '请先在左侧选择具体目录后再拖拽归类。' })
+                      return
+                    }
+                    const updated = await addReferenceImageLabel(refId, currentLabel)
+                    // 更新当前目录列表中的该图片状态，并确保仍在当前视图
+                    setReferenceImages(prev => {
+                      const labels = Array.from(new Set([updated.label, ...(updated.labels ?? [])].filter(Boolean)))
+                      const stillMatches = labels.includes(currentLabel)
+                      const exists = prev.some(it => it.id === refId)
+                      const next = exists ? prev.map(it => (it.id === refId ? updated : it)) : [updated, ...prev]
+                      return stillMatches ? next : prev.filter(it => it.id !== refId)
+                    })
+                    // 同步“参考图模块”列表状态
+                    setAllRefImages(prev => (prev || []).map(it => (it.id === refId ? updated : it)))
+                    setStatus({ type: 'success', text: '已归入当前目录。' })
+                  } catch (err: any) {
+                    console.error('目录视图拖拽归类失败', err)
+                    setStatus({ type: 'error', text: err?.message || '拖拽归类失败' })
+                  }
+                }}
+              >
                 {referenceImages.length ? (
                   referenceImages.map(image => {
                     const isSelected = selectedReferenceIds.includes(image.id)
@@ -3934,6 +4344,10 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                         className={`flex items-center gap-2 rounded border px-3 py-2 text-xs ${
                           isSelected ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600'
                         }`}
+                        draggable
+                        onDragStart={e => {
+                          e.dataTransfer.setData('ref-id', image.id)
+                        }}
                       >
                         <button
                           type="button"
@@ -3959,18 +4373,26 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                               className="h-full w-full cursor-zoom-in object-cover"
                             />
                           </span>
-                          <span className="max-w-[160px] truncate text-left">
-                            {image.label ?? image.url}
-                          </span>
+                          {/* 不显示 URL/ID 文本，保持简洁，仅展示标签 */}
+                          {(() => {
+                            const labels = Array.from(new Set([image.label, ...(image.labels ?? [])].filter(Boolean)))
+                            return labels.length ? (
+                              <span className="flex flex-wrap gap-1">
+                                {labels.map(l => (
+                                  <span key={l} className="rounded bg-gray-100 px-1 text-[10px] text-gray-600">{l}</span>
+                                ))}
+                              </span>
+                            ) : null
+                          })()}
                           <input
                             type="text"
                             defaultValue={image.label ?? ''}
-                            placeholder="Rename label"
+                            placeholder="编辑分类"
                             onBlur={async (e) => {
                               const newLabel = e.currentTarget.value.trim()
                               if ((image.label ?? '') === newLabel) return
                               try {
-                                const updated = await updateReferenceImageLabel(image.id, newLabel)
+                                const updated = await updateReferenceImageLabel(image.id, newLabel === '' ? null : newLabel)
                                 setReferenceImages(prev => prev.map(it => it.id === image.id ? updated : it))
                                 setStatus({ type: 'success', text: '参考图标签已更新' })
                               } catch (err: any) {
@@ -3983,10 +4405,33 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleRemoveReferenceImage(image.id)}
+                          onClick={async () => {
+                            try {
+                              const currentLabel = selectedFolderLabel ?? null
+                              let updated: ReferenceImage | null = null
+                              if (currentLabel) {
+                                // 先移除多标签数组中的当前目录标签
+                                updated = await removeReferenceImageLabel(image.id, currentLabel)
+                                // 若主标签等于当前目录，一并清空主标签
+                                if (image.label === currentLabel) {
+                                  updated = await updateReferenceImageLabel(image.id, null)
+                                }
+                              } else {
+                                // 非目录视图兜底：清空主标签
+                                updated = await updateReferenceImageLabel(image.id, null)
+                              }
+                              setReferenceImages(prev => prev.filter(it => it.id !== image.id))
+                              setSelectedReferenceIds(prev => prev.filter(item => item !== image.id))
+                              await reloadFolders()
+                              setStatus({ type: 'success', text: '已移出目录。' })
+                            } catch (err: any) {
+                              console.error('移出目录失败', err)
+                              setStatus({ type: 'error', text: err?.message || '移出目录失败' })
+                            }
+                          }}
                           className="rounded border border-transparent px-2 py-1 text-[11px] text-gray-500 hover:border-red-300 hover:text-red-600"
                         >
-                          Remove
+                          移出目录
                         </button>
                       </div>
                     )
@@ -3995,31 +4440,112 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                   <p className="text-xs text-gray-500">No reference images yet.</p>
                 )}
               </div>
+              {/* 主参考图区域的“加载更多”按钮 */}
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={loadMoreReferences}
+                  disabled={!refHasMore || isLoadingMoreRefs}
+                  className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isLoadingMoreRefs ? '加载中…' : '加载更多'}
+                </button>
+                {!refHasMore && referenceImages.length > 0 && (
+                  <span className="text-[11px] text-gray-500">没有更多参考图</span>
+                )}
+              </div>
+            </div>
+            {/* 参考图模块：用于拖拽归类，显示最近 10 张 */}
+            <div className="space-y-2 rounded-md border border-gray-100 bg-gray-50 p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-gray-700">参考图模块</span>
+                <button
+                  type="button"
+                  onClick={loadMoreAllReferences}
+                  disabled={isLoadingMoreAllRefs || !allRefHasMore}
+                  className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isLoadingMoreAllRefs ? 'Loading…' : allRefHasMore ? '加载更多' : '没有更多'}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {allRefImages.length ? (
+                  allRefImages.map(image => (
+                    <div
+                      key={image.id}
+                      className="flex items-center gap-2 rounded border border-gray-200 px-2 py-1 text-xs text-gray-700"
+                      draggable
+                      onDragStart={e => {
+                        e.dataTransfer.setData('ref-id', image.id)
+                      }}
+                    >
+                      <span className="h-8 w-8 overflow-hidden rounded bg-gray-100">
+                        <img
+                          src={image.url}
+                          alt={image.label ?? 'Reference'}
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          onError={e => {
+                            const img = e.currentTarget as HTMLImageElement
+                            img.src = '/file.svg'
+                            img.classList.remove('object-cover')
+                            img.classList.add('object-contain')
+                          }}
+                          className="h-full w-full object-cover"
+                        />
+                      </span>
+                      {/* 参考图列表不显示 URL/ID 文本，仅展示标签 chips */}
+                      {(() => {
+                        const labels = Array.from(new Set([image.label, ...(image.labels ?? [])].filter(Boolean)))
+                        return labels.length ? (
+                          <span className="flex flex-wrap gap-1">
+                            {labels.map(l => (
+                              <span key={l} className="rounded bg-gray-100 px-1 text-[10px] text-gray-600">{l}</span>
+                            ))}
+                          </span>
+                        ) : null
+                      })()}
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        title="删除参考图"
+                        onClick={async () => {
+                          try {
+                            await removeReferenceImage(image.id)
+                            setAllRefImages(prev => prev.filter(it => it.id !== image.id))
+                            // 同步移除可能已加载的当前目录列表与选择集
+                            setReferenceImages(prev => prev.filter(it => it.id !== image.id))
+                            setSelectedReferenceIds(prev => prev.filter(id => id !== image.id))
+                            await reloadFolders()
+                            setStatus({ type: 'success', text: '参考图已删除。' })
+                          } catch (err: any) {
+                            console.error('删除参考图失败', err)
+                            setStatus({ type: 'error', text: err?.message || '删除参考图失败' })
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            ;(e.currentTarget as HTMLElement).click()
+                          }
+                        }}
+                        className="ml-1 cursor-pointer rounded border border-red-300 px-1 py-0.5 text-[10px] text-red-600 hover:bg-red-50"
+                      >
+                        删除
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-gray-500">暂无参考图</p>
+                )}
+              </div>
             </div>
             {doubaoSizeError && (
               <p className="text-xs text-red-600">{doubaoSizeError}</p>
             )}
           </div>
 
-          <div className="flex flex-col items-end gap-3">
-            <button
-              type="button"
-              onClick={handleGenerateImages}
-              disabled={isGeneratingImages || !isDoubaoSizeValid}
-              className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isGeneratingImages ? `Generating ${imageProgress}%` : 'Generate images'}
-            </button>
-            <button
-              type="button"
-              onClick={handleBulkDownloadImages}
-              disabled={isDownloadingImages || Object.keys(imageResults).length === 0}
-              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-              title="下载已生成的图片（按分镜号命名）"
-            >
-              {isDownloadingImages ? 'Downloading...' : `Download images (${Object.keys(imageResults).length})`}
-            </button>
-          </div>
+          {/* 已迁移到右侧悬浮容器，这里移除内联按钮 */}
         </div>
 
         

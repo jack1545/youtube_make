@@ -4,13 +4,14 @@ import { getDb } from '@/lib/mongodb'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-// GET /api/reference-images?user_id=...&limit=10&before=ISO8601
+// GET /api/reference-images?user_id=...&limit=10&before=ISO8601&label=xxx
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url)
     const userId = url.searchParams.get('user_id')
     const limitStr = url.searchParams.get('limit')
     const before = url.searchParams.get('before') // created_at 游标
+    const labelParam = url.searchParams.get('label') // 目录名；'__none__' 表示未归类
     const limit = Math.max(1, Math.min(Number(limitStr) || 10, 50))
 
     if (!userId) {
@@ -20,10 +21,31 @@ export async function GET(req: Request) {
     // 仅使用 MongoDB
     const db = await getDb()
     const coll = db.collection('reference_images')
-    const filter: any = { user_id: userId }
-    if (before) {
-      filter.created_at = { $lt: before }
+
+    // 构造支持多标签的过滤：
+    // - 指定 label 时，labels 数组包含或旧字段 label 等于该值
+    // - '__none__' 时，labels 为空或不存在，且旧字段 label 为空或不存在
+    const baseFilter: any = { user_id: userId }
+    if (before) baseFilter.created_at = { $lt: before }
+
+    let filter: any = baseFilter
+    if (labelParam) {
+      if (labelParam === '__none__') {
+        filter = {
+          ...baseFilter,
+          $and: [
+            { $or: [
+              { labels: { $exists: false } },
+              { $expr: { $eq: [ { $size: { $ifNull: [ '$labels', [] ] } }, 0 ] } }
+            ] },
+            { $or: [ { label: null }, { label: { $exists: false } } ] }
+          ]
+        }
+      } else {
+        filter = { ...baseFilter, $or: [ { labels: labelParam }, { label: labelParam } ] }
+      }
     }
+
     const docs = await coll
       .find(filter)
       .sort({ created_at: -1 })
@@ -35,6 +57,7 @@ export async function GET(req: Request) {
       user_id: d.user_id,
       url: d.url,
       label: d.label ?? null,
+      labels: Array.isArray(d.labels) ? d.labels : undefined,
       created_at: typeof d.created_at === 'string' ? d.created_at : new Date(d.created_at).toISOString()
     }))
 
@@ -46,7 +69,7 @@ export async function GET(req: Request) {
 }
 
 // POST /api/reference-images
-// body: { url: string, label?: string, user_id: string }
+// body: { url: string, label?: string, labels?: string[], user_id: string }
 export async function POST(req: Request) {
   try {
     const payload = await req.json().catch(() => null)
@@ -54,7 +77,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: '无效请求体' }, { status: 400 })
     }
 
-    const { url, label, user_id } = payload as { url?: string; label?: string; user_id?: string }
+    const { url, label, labels, user_id } = payload as { url?: string; label?: string; labels?: string[]; user_id?: string }
     if (!url || typeof url !== 'string' || !user_id || typeof user_id !== 'string') {
       return NextResponse.json({ error: '缺少必要字段 url 或 user_id' }, { status: 400 })
     }
@@ -69,12 +92,15 @@ export async function POST(req: Request) {
     const db = await getDb()
     const coll = db.collection('reference_images')
     const nowIso = new Date().toISOString()
-    const doc: any = { user_id, url, label: label ?? null, created_at: nowIso }
+    const normalizedLabels = Array.isArray(labels)
+      ? labels.filter(l => typeof l === 'string' && l.trim()).map(l => l.trim())
+      : (typeof label === 'string' && label.trim() ? [label.trim()] : [])
+    const doc: any = { user_id, url, label: (typeof label === 'string' ? label.trim() : null), labels: normalizedLabels, created_at: nowIso }
 
     // 若已有唯一 id 字段，使用；否则让 Mongo 生成 _id
     const result = await coll.insertOne(doc)
     const id = result.insertedId ? String(result.insertedId) : doc.id
-    const item = { id, user_id, url, label: label ?? null, created_at: nowIso }
+    const item = { id, user_id, url, label: (typeof label === 'string' ? label.trim() : null), labels: normalizedLabels, created_at: nowIso }
     return NextResponse.json({ item })
   } catch (err: any) {
     console.error('API:insert reference_images exception', err)
@@ -83,7 +109,7 @@ export async function POST(req: Request) {
 }
 
 // PATCH /api/reference-images
-// body: { id: string, label: string, user_id: string }
+// body: { id: string, label?: string | null, user_id: string, op?: 'add'|'remove' }
 export async function PATCH(req: Request) {
   try {
     const payload = await req.json().catch(() => null)
@@ -91,7 +117,7 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: '无效请求体' }, { status: 400 })
     }
 
-    const { id, label, user_id } = payload as { id?: string; label?: string; user_id?: string }
+    const { id, label, user_id, op } = payload as { id?: string; label?: string | null; user_id?: string; op?: string }
     if (!id || typeof id !== 'string' || !user_id || typeof user_id !== 'string') {
       return NextResponse.json({ error: '缺少必要字段 id 或 user_id' }, { status: 400 })
     }
@@ -99,20 +125,47 @@ export async function PATCH(req: Request) {
     const db = await getDb()
     const coll = db.collection('reference_images')
 
-    // 支持通过 _id 或 id 查询
-    const filter = [{ _id: new (await import('mongodb')).ObjectId(id), user_id }, { id, user_id }]
-    const doc = await coll.findOne({ $or: filter as any })
+    // 支持通过 _id 或 id 查询，且在构造 ObjectId 前先校验合法性
+    const { ObjectId } = await import('mongodb')
+    const candidates: any[] = []
+    if (ObjectId.isValid(id)) {
+      candidates.push({ _id: new ObjectId(id), user_id })
+    }
+    candidates.push({ id, user_id })
+    const doc = await coll.findOne({ $or: candidates as any })
     if (!doc) {
       return NextResponse.json({ error: '参考图不存在或不属于该用户' }, { status: 404 })
     }
 
-    await coll.updateOne({ _id: doc._id }, { $set: { label: label ?? null } })
+    // 根据 op 决定更新逻辑：
+    // - op='add'：向 labels 添加（去重），不改动旧 label 字段
+    // - op='remove'：从 labels 移除，不改动旧 label 字段
+    // - 未指定 op：兼容旧逻辑，设置单一 label，并同时同步 labels
+    let update: any = {}
+    const trimmed = typeof label === 'string' ? label.trim() : null
+    if (op === 'add') {
+      if (!trimmed) return NextResponse.json({ error: 'add 操作需要非空 label' }, { status: 400 })
+      update = { $addToSet: { labels: trimmed } }
+    } else if (op === 'remove') {
+      if (!trimmed) return NextResponse.json({ error: 'remove 操作需要非空 label' }, { status: 400 })
+      update = { $pull: { labels: trimmed } }
+    } else {
+      // 旧逻辑：设为未归类或单一目录
+      if (trimmed === null) {
+        update = { $set: { label: null, labels: [] } }
+      } else {
+        update = { $set: { label: trimmed }, $addToSet: { labels: trimmed } }
+      }
+    }
+
+    await coll.updateOne({ _id: doc._id }, update)
     const updated = await coll.findOne({ _id: doc._id })
     const item = {
       id: updated?.id || String(updated?._id),
       user_id: updated?.user_id,
       url: updated?.url,
       label: updated?.label ?? null,
+      labels: Array.isArray(updated?.labels) ? updated?.labels : undefined,
       created_at: typeof updated?.created_at === 'string' ? updated?.created_at : new Date(updated?.created_at).toISOString()
     }
 

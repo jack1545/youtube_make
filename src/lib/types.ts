@@ -60,6 +60,7 @@ export interface ReferenceImage {
   user_id: string
   url: string
   label?: string
+  labels?: string[]
   created_at: string
 }
 
@@ -70,6 +71,16 @@ export interface ReferenceVideo {
   label?: string
   script_id?: string | null
   created_at: string
+}
+
+export interface ReferenceFolder {
+  id: string
+  user_id: string
+  name: string
+  label?: string | null
+  created_at: string
+  cover_url?: string | null
+  count?: number
 }
 
 export interface ApiKeySettings {
