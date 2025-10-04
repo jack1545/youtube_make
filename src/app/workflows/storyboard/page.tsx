@@ -707,7 +707,9 @@ export default function StoryboardWorkflowPage() {
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
   // Gemini 新功能（分镜提示词CSV & 世界观改写）
   const [isPrompting, setIsPrompting] = useState(false)
-  const [promptCsv, setPromptCsv] = useState('')
+const [promptCsv, setPromptCsv] = useState('')
+const [customPromptLine, setCustomPromptLine] = useState('')
+const [customPromptBulk, setCustomPromptBulk] = useState('')
   const [promptError, setPromptError] = useState<string | null>(null)
   const [isRewriting, setIsRewriting] = useState(false)
   const [worldview, setWorldview] = useState('赛博朋克')
@@ -3380,6 +3382,122 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               >
                 复制
               </button>
+              {/* 自定义分镜文本输入并追加 */}
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={customPromptLine}
+                  onChange={e => setCustomPromptLine(e.target.value)}
+                  placeholder="自定义分镜文本（每行一条）"
+                  className="rounded border border-blue-300 px-2 py-1 text-[11px] bg-white"
+                />
+                <button
+                  type="button"
+                  className="rounded border border-blue-300 px-2 py-1 text-[11px] text-blue-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                  disabled={!customPromptLine.trim()}
+                  onClick={async () => {
+                    const line = customPromptLine.trim()
+                    if (!line) return
+                    // 合并文本
+                    const merged = promptCsv ? `${promptCsv}\n${line}` : line
+                    setPromptCsv(merged)
+                    setCustomPromptLine('')
+                    setStatus({ type: 'success', text: '已追加一条自定义分镜文本。' })
+
+                    // 追加后立即保存到 MongoDB
+                    try {
+                      if (!scriptId) {
+                        setStatus({ type: 'info', text: '请先选择或创建脚本。' })
+                        return
+                      }
+                      if (!segments.length) {
+                        setStatus({ type: 'info', text: '请先在 Step 1 解析分镜脚本。' })
+                        return
+                      }
+                      const lines = merged.split(/\r?\n/).map(l => stripLeadingOrder(l.trim())).filter(Boolean)
+                      const payload: Array<{ shot_number: number; text: string }> = []
+                      segments.forEach((seg, i) => {
+                        const idx = typeof seg.shotNumber === 'number' ? seg.shotNumber - 1 : i
+                        const text = lines[idx] || ''
+                        if (text) payload.push({ shot_number: seg.shotNumber || i + 1, text })
+                      })
+                      if (!payload.length) {
+                        setStatus({ type: 'info', text: '当前没有可保存的分镜文本。' })
+                        return
+                      }
+                      const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+                      const res = await fetch(`${baseOrigin}/api/video-prompts`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ script_id: scriptId, prompts: payload })
+                      })
+                      if (!res.ok) {
+                        const err = await res.json().catch(() => null)
+                        console.error('保存分镜文本失败', err)
+                        setStatus({ type: 'error', text: '保存分镜文本失败。' })
+                        return
+                      }
+                      setStatus({ type: 'success', text: `已保存 ${payload.length} 条分镜提示词到数据库。` })
+                    } catch (e) {
+                      console.error('保存分镜文本异常', e)
+                      setStatus({ type: 'error', text: '保存分镜文本异常。' })
+                    }
+                  }}
+                  title="将输入追加为一行分镜文本并保存到 MongoDB"
+                >
+                  追加一行
+                </button>
+              </div>
+              <button
+                type="button"
+                className="rounded border border-green-300 px-2 py-1 text-[11px] text-green-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                onClick={async () => {
+                  try {
+                    if (!promptCsv) return
+                    const lines = promptCsv.split(/\r?\n/).map(l => stripLeadingOrder(l.trim())).filter(Boolean)
+                    if (!scriptId) {
+                      setStatus({ type: 'info', text: '请先选择或创建脚本。' })
+                      return
+                    }
+                    if (!segments.length) {
+                      setStatus({ type: 'info', text: '请先在 Step 1 解析分镜脚本。' })
+                      return
+                    }
+                    const promptsPayload: Array<{ shot_number: number; text: string }> = []
+                    segments.forEach((seg, i) => {
+                      const idx = typeof seg.shotNumber === 'number' ? seg.shotNumber - 1 : i
+                      const text = lines[idx] || ''
+                      if (text) {
+                        promptsPayload.push({ shot_number: seg.shotNumber || i + 1, text })
+                      }
+                    })
+                    if (!promptsPayload.length) {
+                      setStatus({ type: 'info', text: '当前没有可保存的分镜文本。' })
+                      return
+                    }
+                    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+                    const res = await fetch(`${baseOrigin}/api/video-prompts`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ script_id: scriptId, prompts: promptsPayload })
+                    })
+                    if (!res.ok) {
+                      const err = await res.json().catch(() => null)
+                      console.error('保存分镜文本失败', err)
+                      setStatus({ type: 'error', text: '保存分镜文本失败。' })
+                      return
+                    }
+                    setStatus({ type: 'success', text: `已保存 ${promptsPayload.length} 条分镜提示词到数据库。` })
+                  } catch (e) {
+                    console.error('保存分镜文本异常', e)
+                    setStatus({ type: 'error', text: '保存分镜文本异常。' })
+                  }
+                }}
+                disabled={!promptCsv}
+                title="保存生成视频分镜提示词（每行一条）到 MongoDB"
+              >
+                保存分镜文本
+              </button>
               <button
                 type="button"
                 className="rounded border border-green-300 px-2 py-1 text-[11px] text-green-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
@@ -3437,6 +3555,145 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             </div>
           </div>
           {promptError && <p className="text-xs text-red-600">{promptError}</p>}
+          {/* 自定义多行分镜文本输入 */}
+          <div className="mb-2 rounded-md border border-blue-200 bg-white p-3">
+            <label className="text-xs font-semibold text-gray-700" htmlFor="custom-bulk-input">自定义分镜文本（多行，一行一条）</label>
+            <textarea
+              id="custom-bulk-input"
+              value={customPromptBulk}
+              onChange={e => setCustomPromptBulk(e.target.value)}
+              placeholder={"分镜1文本\n分镜2文本\n..."}
+              className="mt-1 h-28 w-full rounded-md border border-blue-200 px-3 py-2 text-xs font-mono"
+            />
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded border border-blue-300 px-2 py-1 text-[11px] text-blue-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                disabled={!customPromptBulk.trim()}
+                onClick={async () => {
+                  const bulk = customPromptBulk.split(/\r?\n/).map(l => l.trim()).filter(Boolean).join('\n')
+                  if (!bulk) return
+                  // 合并文本
+                  const merged = promptCsv ? `${promptCsv}\n${bulk}` : bulk
+                  setPromptCsv(merged)
+                  setCustomPromptBulk('')
+                  setStatus({ type: 'success', text: '已追加多行分镜文本。' })
+
+                  // 追加后立即保存到 MongoDB
+                  try {
+                    if (!scriptId) {
+                      setStatus({ type: 'info', text: '请先选择或创建脚本。' })
+                      return
+                    }
+                    if (!segments.length) {
+                      setStatus({ type: 'info', text: '请先在 Step 1 解析分镜脚本。' })
+                      return
+                    }
+                    const lines = merged.split(/\r?\n/).map(l => stripLeadingOrder(l.trim())).filter(Boolean)
+                    const payload: Array<{ shot_number: number; text: string }> = []
+                    segments.forEach((seg, i) => {
+                      const idx = typeof seg.shotNumber === 'number' ? seg.shotNumber - 1 : i
+                      const text = lines[idx] || ''
+                      if (text) payload.push({ shot_number: seg.shotNumber || i + 1, text })
+                    })
+                    if (!payload.length) {
+                      setStatus({ type: 'info', text: '当前没有可保存的分镜文本。' })
+                      return
+                    }
+                    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+                    const res = await fetch(`${baseOrigin}/api/video-prompts`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ script_id: scriptId, prompts: payload })
+                    })
+                    if (!res.ok) {
+                      const err = await res.json().catch(() => null)
+                      console.error('保存分镜文本失败', err)
+                      setStatus({ type: 'error', text: '保存分镜文本失败。' })
+                      return
+                    }
+                    setStatus({ type: 'success', text: `已保存 ${payload.length} 条分镜提示词到数据库。` })
+                  } catch (e) {
+                    console.error('保存分镜文本异常', e)
+                    setStatus({ type: 'error', text: '保存分镜文本异常。' })
+                  }
+                }}
+                title="将多行内容追加并保存到 MongoDB"
+              >
+                追加到当前
+              </button>
+              <button
+                type="button"
+                className="rounded border border-indigo-300 px-2 py-1 text-[11px] text-indigo-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                disabled={!customPromptBulk.trim()}
+                onClick={async () => {
+                  const bulk = customPromptBulk.split(/\r?\n/).map(l => l.trim()).filter(Boolean).join('\n')
+                  if (!bulk) return
+                  setPromptCsv(bulk)
+                  setCustomPromptBulk('')
+                  setStatus({ type: 'success', text: '已覆盖为自定义多行分镜文本。' })
+
+                  // 覆盖后立即保存到 MongoDB
+                  try {
+                    if (!scriptId) {
+                      setStatus({ type: 'info', text: '请先选择或创建脚本。' })
+                      return
+                    }
+                    if (!segments.length) {
+                      setStatus({ type: 'info', text: '请先在 Step 1 解析分镜脚本。' })
+                      return
+                    }
+                    const lines = bulk.split(/\r?\n/).map(l => stripLeadingOrder(l.trim())).filter(Boolean)
+                    const payload: Array<{ shot_number: number; text: string }> = []
+                    segments.forEach((seg, i) => {
+                      const idx = typeof seg.shotNumber === 'number' ? seg.shotNumber - 1 : i
+                      const text = lines[idx] || ''
+                      if (text) payload.push({ shot_number: seg.shotNumber || i + 1, text })
+                    })
+                    if (!payload.length) {
+                      setStatus({ type: 'info', text: '当前没有可保存的分镜文本。' })
+                      return
+                    }
+                    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+                    const res = await fetch(`${baseOrigin}/api/video-prompts`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ script_id: scriptId, prompts: payload })
+                    })
+                    if (!res.ok) {
+                      const err = await res.json().catch(() => null)
+                      console.error('保存分镜文本失败', err)
+                      setStatus({ type: 'error', text: '保存分镜文本失败。' })
+                      return
+                    }
+                    setStatus({ type: 'success', text: `已保存 ${payload.length} 条分镜提示词到数据库。` })
+                  } catch (e) {
+                    console.error('保存分镜文本异常', e)
+                    setStatus({ type: 'error', text: '保存分镜文本异常。' })
+                  }
+                }}
+                title="用多行内容覆盖并保存到 MongoDB"
+              >
+                覆盖当前
+              </button>
+            </div>
+          </div>
+          {/* 已保存的分镜提示词（MongoDB）展示 */}
+          <div className="mb-2 rounded-md border border-blue-200 bg-white p-3">
+            <h4 className="text-xs font-semibold text-gray-700">已保存的分镜提示词（MongoDB）</h4>
+            {segments.some(seg => (videoPromptOverrides[seg.id] || '').trim()) ? (
+              <textarea
+                readOnly
+                value={segments
+                  .map(seg => (videoPromptOverrides[seg.id] || '').trim())
+                  .filter(Boolean)
+                  .join('\n')}
+                className="mt-1 h-28 w-full rounded-md border border-blue-200 px-3 py-2 text-xs font-mono bg-white"
+              />
+            ) : (
+              <p className="text-xs text-blue-700">暂无已保存的分镜提示词。</p>
+            )}
+          </div>
           {promptCsv ? (
             <textarea
               value={promptCsv}
@@ -5122,6 +5379,51 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               />
               Use image as first frame
             </label>
+            <button
+              type="button"
+              className="rounded-md border border-green-300 px-3 py-1 text-sm font-medium text-green-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={!scriptId || segments.length === 0}
+              title="保存当前 Step 4 的 Video Prompt 到 MongoDB"
+              onClick={async () => {
+                try {
+                  if (!scriptId) {
+                    setStatus({ type: 'info', text: '请先选择或创建脚本。' })
+                    return
+                  }
+                  if (!segments.length) {
+                    setStatus({ type: 'info', text: '请先在 Step 1 解析分镜脚本。' })
+                    return
+                  }
+                  const payload: Array<{ shot_number: number; text: string }> = []
+                  segments.forEach((seg, i) => {
+                    const text = (videoPromptOverrides[seg.id] || '').trim()
+                    if (text) payload.push({ shot_number: seg.shotNumber || i + 1, text })
+                  })
+                  if (!payload.length) {
+                    setStatus({ type: 'info', text: '当前没有可保存的 Video Prompt。' })
+                    return
+                  }
+                  const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+                  const res = await fetch(`${baseOrigin}/api/video-prompts`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ script_id: scriptId, prompts: payload })
+                  })
+                  if (!res.ok) {
+                    const err = await res.json().catch(() => null)
+                    console.error('保存 Video Prompt 失败', err)
+                    setStatus({ type: 'error', text: '保存 Video Prompt 失败。' })
+                    return
+                  }
+                  setStatus({ type: 'success', text: `已保存 ${payload.length} 条 Video Prompt 到 MongoDB。` })
+                } catch (e) {
+                  console.error('保存 Video Prompt 异常', e)
+                  setStatus({ type: 'error', text: '保存 Video Prompt 异常。' })
+                }
+              }}
+            >
+              保存当前 Video Prompt
+            </button>
             <button
               type="button"
               onClick={handleSubmitVideos}
