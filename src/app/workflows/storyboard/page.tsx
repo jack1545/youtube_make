@@ -1114,6 +1114,83 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
 
   const projectSlug = useMemo(() => slugify(projectName || 'storyboard'), [projectName])
 
+  // 任务队列（MVP：前端本地持久化）
+  type TaskStatus = 'pending' | 'running' | 'success' | 'error' | 'cancelled'
+  interface TaskItem {
+    id: string
+    type: 'image' | 'video'
+    projectId?: string | null
+    scriptId?: string | null
+    scriptName?: string
+    shotCount: number
+    status: TaskStatus
+    progress: number // 0..1
+    createdAt: number
+    updatedAt: number
+    params?: Record<string, any>
+    outputs?: Record<string, any>
+    error?: string
+  }
+
+  const [tasks, setTasks] = useState<TaskItem[]>(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem('storyboard_tasks') : null
+      const parsed = raw ? JSON.parse(raw) : []
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  })
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        // 仅保留最近 50 条
+        const trimmed = tasks.slice(0, 50)
+        localStorage.setItem('storyboard_tasks', JSON.stringify(trimmed))
+      }
+    } catch {}
+  }, [tasks])
+  const enqueueTask = useCallback((payload: Omit<TaskItem, 'id' | 'createdAt' | 'updatedAt' | 'status' | 'progress'> & { status?: TaskStatus }) => {
+    const id = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const now = Date.now()
+    const item: TaskItem = {
+      id,
+      type: payload.type,
+      projectId: payload.projectId,
+      scriptId: payload.scriptId,
+      scriptName: payload.scriptName,
+      shotCount: payload.shotCount,
+      status: payload.status ?? 'running',
+      progress: 0,
+      createdAt: now,
+      updatedAt: now,
+      params: payload.params,
+      outputs: payload.outputs
+    }
+    setTasks(prev => [item, ...prev])
+    return id
+  }, [])
+  const updateTask = useCallback((id: string, patch: Partial<TaskItem>) => {
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, ...patch, updatedAt: Date.now() } : t))
+  }, [])
+  const completeTask = useCallback((id: string, outputs?: Record<string, any>) => {
+    updateTask(id, { status: 'success', progress: 1, outputs })
+  }, [updateTask])
+  const failTask = useCallback((id: string, error?: string) => {
+    updateTask(id, { status: 'error', error })
+  }, [updateTask])
+  const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false)
+  const activeTaskCount = useMemo(() => tasks.filter(t => t.status === 'running' || t.status === 'pending').length, [tasks])
+  const currentScriptName = useMemo(() => {
+    try {
+      // existingScripts 可能在上文定义并维护
+      const s = (existingScripts || []).find((x: any) => x.id === scriptId)
+      return s?.name || undefined
+    } catch {
+      return undefined
+    }
+  }, [scriptId, existingScripts])
+
   // 加载更多参考图（基于 created_at 游标）
   const loadMoreReferences = useCallback(async () => {
     if (isLoadingMoreRefs || !refHasMore) return
@@ -1971,6 +2048,16 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         return
       }
 
+      // 入列单镜头图片任务
+      const singleTaskId = enqueueTask({
+        type: 'image',
+        projectId,
+        scriptId,
+        scriptName: currentScriptName,
+        shotCount: 1,
+        params: { size: doubaoSizeValue, shot: segment.shotNumber }
+      })
+
       setGeneratingShotIds(prev => ({ ...prev, [segment.id]: true }))
       try {
         const referenceUrls = selectedReferenceImages.map(image => image.url)
@@ -2000,6 +2087,9 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           const marker = doubaoSizeLabel ? ` at ${doubaoSizeLabel}` : ''
           setStatus({ type: 'success', text: `Generated image for shot ${segment.shotNumber}${marker}.` })
 
+          // 任务进度与完成
+          updateTask(singleTaskId, { progress: 1, status: 'success', outputs: { url: result.url } })
+
           // 若未提供 scriptId，则前端调用 API 写库；提供了 scriptId 时已由服务端持久化，避免重复写入
           if (!scriptId) {
             try {
@@ -2017,6 +2107,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
       } catch (error) {
         console.error(`Failed to generate image for shot ${segment.id}`, error)
         setStatus({ type: 'error', text: `Failed to generate image for shot ${segment.shotNumber}.` })
+        failTask(singleTaskId, error instanceof Error ? error.message : 'Generate image failed')
       } finally {
         setGeneratingShotIds(prev => {
           const next = { ...prev }
@@ -2025,7 +2116,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         })
       }
     },
-    [doubaoSizeValue, doubaoSizeError, doubaoSizeLabel, selectedReferenceImages, setImageResults, setStatus]
+    [doubaoSizeValue, doubaoSizeError, doubaoSizeLabel, selectedReferenceImages, setImageResults, setStatus, enqueueTask, updateTask, failTask, currentScriptName]
   )
 
   const handleGenerateImages = useCallback(async () => {
@@ -2051,6 +2142,16 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     const prompts = targets.map(segment => formatPromptForModel(segment))
     const selectedRefs = selectedReferenceImages
 
+    // 入列批量图片任务
+    const batchTaskId = enqueueTask({
+      type: 'image',
+      projectId,
+      scriptId,
+      scriptName: currentScriptName,
+      shotCount: targets.length,
+      params: { size: doubaoSizeValue, refs: selectedReferenceImages.length }
+    })
+
     setIsGeneratingImages(true)
     setImageProgress(0)
     try {
@@ -2071,6 +2172,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           size: doubaoSizeValue,
           onProgress: (completed, total) => {
             setImageProgress(Math.round((completed / total) * 100))
+            updateTask(batchTaskId, { progress: completed / total, status: 'running' })
           },
           scriptId: scriptId ?? undefined
         }
@@ -2113,14 +2215,16 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         type: 'success',
         text: `Generated ${results.length} reference images${doubaoSizeLabel ? ` at ${doubaoSizeLabel}` : ''}.`
       })
+      completeTask(batchTaskId, { count: results.length })
     } catch (error) {
       console.error('Failed to generate images via Doubao', error)
       setStatus({ type: 'error', text: 'Doubao image generation failed. Check API settings.' })
+      failTask(batchTaskId, error instanceof Error ? error.message : 'Doubao image generation failed')
     } finally {
       setIsGeneratingImages(false)
       setImageProgress(0)
     }
-  }, [segments, selectedForImages, doubaoSizeValue, doubaoSizeError, doubaoSizeLabel, selectedReferenceImages, imageResults])
+  }, [segments, selectedForImages, doubaoSizeValue, doubaoSizeError, doubaoSizeLabel, selectedReferenceImages, imageResults, enqueueTask, updateTask, completeTask, failTask, currentScriptName])
 
   const downloadImage = useCallback(async (url: string, filename: string) => {
     if (typeof window === 'undefined') {
@@ -2175,6 +2279,16 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
       return
     }
 
+    // 入列批量视频任务
+    const videoTaskId = enqueueTask({
+      type: 'video',
+      projectId,
+      scriptId,
+      scriptName: currentScriptName,
+      shotCount: targets.length,
+      params: { model: veoModel, aspectRatio: veoAspectRatio, enhancePrompt: veoEnhancePrompt, upsample: veoUpsample, useImageAsKeyframe }
+    })
+
     setIsSubmittingVideo(true)
     try {
       const nextJobs: Record<string, VideoJobState> = { ...videoJobs }
@@ -2208,6 +2322,11 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           }
           setVideoJobs({ ...nextJobs })
 
+          // 任务进度更新
+          const completedIndex = targets.findIndex(t => t.id === target.id)
+          const ratio = Math.max(0, Math.min(1, (completedIndex + 1) / targets.length))
+          updateTask(videoTaskId, { progress: ratio, status: 'running' })
+
           // Persist Veo3 submission to Supabase
           try {
             const saved = await createGeneratedVideo(
@@ -2238,10 +2357,11 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         type: 'success',
         text: `Submitted ${submittedCount} Veo3 task${submittedCount === 1 ? '' : 's'}.`
       })
+      completeTask(videoTaskId, { count: submittedCount })
     } finally {
       setIsSubmittingVideo(false)
     }
-  }, [segments, selectedForVideo, imageResults, videoPromptOverrides, veoModel, veoAspectRatio, veoEnhancePrompt, veoUpsample, useImageAsKeyframe, projectSlug, downloadImage, videoJobs])
+  }, [segments, selectedForVideo, imageResults, videoPromptOverrides, veoModel, veoAspectRatio, veoEnhancePrompt, veoUpsample, useImageAsKeyframe, projectSlug, downloadImage, videoJobs, enqueueTask, updateTask, completeTask, currentScriptName])
 
   // 新增：批量替换 Video prompt 文本
   const handleApplyVideoBulkReplace = useCallback((scope: any) => {
@@ -2355,6 +2475,77 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
   }, [refZoomUrl])
   return (
     <div className="space-y-8">
+      {/* 左侧悬浮任务队列面板 */}
+      <div className="fixed left-4 top-24 z-50 hidden md:block">
+        <div className="flex flex-col items-start">
+          <button
+            type="button"
+            onClick={() => setIsTaskPanelOpen(v => !v)}
+            className="relative rounded-full bg-white shadow border border-gray-200 px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
+            title="任务队列"
+          >
+            {isTaskPanelOpen ? '隐藏任务' : '显示任务'}
+            {activeTaskCount > 0 && (
+              <span className="ml-2 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-blue-600 px-1 text-[10px] font-semibold text-white">
+                {activeTaskCount}
+              </span>
+            )}
+          </button>
+          {isTaskPanelOpen && (
+            <div className="mt-3 w-80 max-h-[420px] overflow-auto rounded-lg border border-gray-200 bg-white p-3 shadow-lg">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-sm font-medium text-gray-800">任务队列</div>
+                <button
+                  type="button"
+                  onClick={() => setTasks(prev => prev.filter((_, idx) => idx < 50))}
+                  className="text-xs text-gray-500 hover:text-gray-700"
+                  title="仅保留最近 50 条"
+                >
+                  清理
+                </button>
+              </div>
+              {tasks.length === 0 ? (
+                <div className="text-xs text-gray-500">暂无任务</div>
+              ) : (
+                <div className="space-y-2">
+                  {tasks.map(t => {
+                    const pct = Math.round((t.progress || 0) * 100)
+                    const statusColor = t.status === 'success'
+                      ? 'text-green-600'
+                      : t.status === 'error'
+                        ? 'text-red-600'
+                        : t.status === 'running'
+                          ? 'text-blue-600'
+                          : 'text-gray-600'
+                    return (
+                      <div key={t.id} className="rounded border border-gray-200 p-2">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <div className="font-medium text-gray-800">
+                            {t.type === 'image' ? '图片生成' : '视频提交'}
+                          </div>
+                          <div className={statusColor}>{t.status}</div>
+                        </div>
+                        <div className="mt-1 text-[11px] text-gray-600">
+                          {t.scriptName || '未命名脚本'} · {t.shotCount} 条
+                        </div>
+                        <div className="mt-2 h-2 w-full rounded bg-gray-200">
+                          <div
+                            className="h-2 rounded bg-blue-500"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        {t.error && (
+                          <div className="mt-1 text-[11px] text-red-600">{t.error}</div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
       <header className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
         <h1 className="text-2xl font-semibold text-gray-900">Storyboard prompt workflow</h1>
         <p className="mt-2 text-sm text-gray-600">
