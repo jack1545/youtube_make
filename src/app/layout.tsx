@@ -29,8 +29,6 @@ export default function RootLayout({
                 <nav className="flex items-center gap-4 text-sm">
                   <Link href="/" className="text-gray-700 hover:text-blue-600">首页</Link>
                   <Link href="/workflows/storyboard" className="text-gray-700 hover:text-blue-600">Storyboard</Link>
-                  <Link href="/veo3" className="text-gray-700 hover:text-blue-600">Veo3提交</Link>
-                  <Link href="/history" className="text-gray-700 hover:text-blue-600">历史项目</Link>
                   {/* 新增本地项目入口 */}
                   <Link href="/workflows/local-projects" className="text-gray-700 hover:text-blue-600">本地项目</Link>
                 </nav>
