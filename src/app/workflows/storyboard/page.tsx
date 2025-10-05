@@ -885,9 +885,9 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [bulkReplaceValue, setBulkReplaceValue] = useState('')
   // 默认替换选项与批量替换规则
   const [bulkRules, setBulkRules] = useState<Array<{ id: string; find: string; replace: string }>>([
-    { id: 'rule_default_1', find: '角色A', replace: '参考图1' },
-    { id: 'rule_default_2', find: '角色B', replace: '参考图2' },
-    { id: 'rule_default_3', find: '角色C', replace: '参考图3' }
+    { id: 'rule_default_1', find: '角色A', replace: '图1' },
+    { id: 'rule_default_2', find: '角色B', replace: '图2' },
+    { id: 'rule_default_3', find: '角色C', replace: '图3' }
   ])
   const [videoJobs, setVideoJobs] = useState<Record<string, VideoJobState>>({})
   const [veoModel, setVeoModel] = useState('veo3-fast-frames')
@@ -5408,91 +5408,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                 )}
               </div>
             </div>
-            {/* 参考图模块：用于拖拽归类，显示最近 10 张 */}
-            <div className="space-y-2 rounded-md border border-gray-100 bg-gray-50 p-3">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-gray-700">参考图模块</span>
-                <button
-                  type="button"
-                  onClick={loadMoreAllReferences}
-                  disabled={isLoadingMoreAllRefs || !allRefHasMore}
-                  className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isLoadingMoreAllRefs ? 'Loading…' : allRefHasMore ? '加载更多' : '没有更多'}
-                </button>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {allRefImages.length ? (
-                  allRefImages.map(image => (
-                    <div
-                      key={image.id}
-                      className="flex items-center gap-2 rounded border border-gray-200 px-2 py-1 text-xs text-gray-700"
-                      draggable
-                      onDragStart={e => {
-                        e.dataTransfer.setData('ref-id', image.id)
-                      }}
-                    >
-                      <span className="h-8 w-8 overflow-hidden rounded bg-gray-100">
-                        <img
-                          src={image.url}
-                          alt={image.label ?? 'Reference'}
-                          loading="lazy"
-                          referrerPolicy="no-referrer"
-                          onError={e => {
-                            const img = e.currentTarget as HTMLImageElement
-                            img.src = '/file.svg'
-                            img.classList.remove('object-cover')
-                            img.classList.add('object-contain')
-                          }}
-                          className="h-full w-full object-cover"
-                        />
-                      </span>
-                      {/* 参考图列表不显示 URL/ID 文本，仅展示标签 chips */}
-                      {(() => {
-                        const labels = Array.from(new Set([image.label, ...(image.labels ?? [])].filter(Boolean)))
-                        return labels.length ? (
-                          <span className="flex flex-wrap gap-1">
-                            {labels.map(l => (
-                              <span key={l} className="rounded bg-gray-100 px-1 text-[10px] text-gray-600">{l}</span>
-                            ))}
-                          </span>
-                        ) : null
-                      })()}
-                      <span
-                        role="button"
-                        tabIndex={0}
-                        title="删除参考图"
-                        onClick={async () => {
-                          try {
-                            await removeReferenceImage(image.id)
-                            setAllRefImages(prev => prev.filter(it => it.id !== image.id))
-                            // 同步移除可能已加载的当前目录列表与选择集
-                            setReferenceImages(prev => prev.filter(it => it.id !== image.id))
-                            setSelectedReferenceIds(prev => prev.filter(id => id !== image.id))
-                            await reloadFolders()
-                            setStatus({ type: 'success', text: '参考图已删除。' })
-                          } catch (err: any) {
-                            console.error('删除参考图失败', err)
-                            setStatus({ type: 'error', text: err?.message || '删除参考图失败' })
-                          }
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            ;(e.currentTarget as HTMLElement).click()
-                          }
-                        }}
-                        className="ml-1 cursor-pointer rounded border border-red-300 px-1 py-0.5 text-[10px] text-red-600 hover:bg-red-50"
-                      >
-                        删除
-                      </span>
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-xs text-gray-500">暂无参考图</p>
-                )}
-              </div>
-            </div>
+            {/* 已移除：参考图模块（用于拖拽归类的最近列表）。当前只保留右侧目录视图与主参考图选择。 */}
             {doubaoSizeError && (
               <p className="text-xs text-red-600">{doubaoSizeError}</p>
             )}
