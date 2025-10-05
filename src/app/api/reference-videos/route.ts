@@ -4,7 +4,7 @@ import { getDb } from '@/lib/mongodb'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-// GET /api/reference-videos?user_id=...&limit=10&before=ISO8601&script_id=...
+// GET /api/reference-videos?user_id=...&limit=10&before=ISO8601&script_id=...&project_id=...
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url)
@@ -12,6 +12,7 @@ export async function GET(req: Request) {
     const limitStr = url.searchParams.get('limit')
     const before = url.searchParams.get('before')
     const scriptId = url.searchParams.get('script_id')
+    const projectId = url.searchParams.get('project_id')
     const limit = Math.max(1, Math.min(Number(limitStr) || 10, 50))
 
     if (!userId) {
@@ -19,10 +20,43 @@ export async function GET(req: Request) {
     }
 
     const db = await getDb()
-    const coll = db.collection('reference_videos')
+  const coll = db.collection('reference_videos')
     const filter: any = { user_id: userId }
-    if (scriptId) filter.script_id = scriptId
     if (before) filter.created_at = { $lt: before }
+
+    // 兼容旧数据：当按项目查询时，返回该项目显式关联的参考视频
+    // 以及该项目下脚本所关联的参考视频（旧记录仅有 script_id）
+    if (scriptId) {
+      filter.script_id = scriptId
+    } else if (projectId) {
+      try {
+        const { ObjectId } = await import('mongodb')
+        const scriptsColl = db.collection('scripts')
+        const scriptDocs = await scriptsColl
+          .find({ user_id: userId, project_id: projectId })
+          .project({ _id: 1, id: 1 })
+          .toArray()
+        const scriptIdStrings = (scriptDocs || [])
+          .map((s: any) => s.id || (s._id ? String(s._id) : undefined))
+          .filter(Boolean)
+        const scriptObjectIds = (scriptDocs || [])
+          .map((s: any) => s._id)
+          .filter(Boolean)
+
+        const orConds: any[] = [{ project_id: projectId }]
+        if (scriptIdStrings.length > 0) {
+          orConds.push({ script_id: { $in: scriptIdStrings } })
+        }
+        if (scriptObjectIds.length > 0) {
+          orConds.push({ script_id: { $in: scriptObjectIds } })
+        }
+        // 兼容历史：script_id 可能以字符串或 ObjectId 两种形式存储
+        filter.$or = orConds
+      } catch (e) {
+        // 如果脚本查询失败，不影响返回显式项目关联的数据
+        filter.project_id = projectId
+      }
+    }
 
     const docs = await coll
       .find(filter)
@@ -36,6 +70,7 @@ export async function GET(req: Request) {
       url: d.url,
       label: d.label ?? null,
       script_id: d.script_id ?? null,
+      project_id: d.project_id ?? null,
       created_at: typeof d.created_at === 'string' ? d.created_at : new Date(d.created_at).toISOString()
     }))
 
@@ -47,7 +82,7 @@ export async function GET(req: Request) {
 }
 
 // POST /api/reference-videos
-// body: { url: string, label?: string, user_id: string, script_id?: string }
+// body: { url: string, label?: string, user_id: string, script_id?: string, project_id?: string }
 export async function POST(req: Request) {
   try {
     const payload = await req.json().catch(() => null)
@@ -55,7 +90,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: '无效请求体' }, { status: 400 })
     }
 
-    const { url, label, user_id, script_id } = payload as { url?: string; label?: string; user_id?: string; script_id?: string }
+    const { url, label, user_id, script_id, project_id } = payload as { url?: string; label?: string; user_id?: string; script_id?: string; project_id?: string }
     if (!url || typeof url !== 'string' || !user_id || typeof user_id !== 'string') {
       return NextResponse.json({ error: '缺少必要字段 url 或 user_id' }, { status: 400 })
     }
@@ -70,11 +105,11 @@ export async function POST(req: Request) {
     const db = await getDb()
     const coll = db.collection('reference_videos')
     const nowIso = new Date().toISOString()
-    const doc: any = { user_id, url, label: label ?? null, script_id: script_id ?? null, created_at: nowIso }
+    const doc: any = { user_id, url, label: label ?? null, script_id: script_id ?? null, project_id: project_id ?? null, created_at: nowIso }
 
     const result = await coll.insertOne(doc)
     const id = result.insertedId ? String(result.insertedId) : doc.id
-    const item = { id, user_id, url, label: label ?? null, script_id: script_id ?? null, created_at: nowIso }
+    const item = { id, user_id, url, label: label ?? null, script_id: script_id ?? null, project_id: project_id ?? null, created_at: nowIso }
     return NextResponse.json({ item })
   } catch (err: any) {
     console.error('API:insert reference_videos exception', err)
@@ -117,6 +152,7 @@ export async function PATCH(req: Request) {
       url: updated?.url,
       label: updated?.label ?? null,
       script_id: updated?.script_id ?? null,
+      project_id: updated?.project_id ?? null,
       created_at: typeof updated?.created_at === 'string' ? updated?.created_at : new Date(updated?.created_at).toISOString()
     }
 

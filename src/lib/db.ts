@@ -1131,7 +1131,7 @@ export async function renameReferenceFolder(oldName: string, newName: string): P
 }
 
 // 参考视频：新增/获取/删除/更新标签
-export async function addReferenceVideo(url: string, label?: string, scriptId?: string | null): Promise<ReferenceVideo> {
+export async function addReferenceVideo(url: string, label?: string, scriptId?: string | null, projectId?: string | null): Promise<ReferenceVideo> {
   const user = getCurrentUser()
 
   if (isDemoMode) {
@@ -1141,6 +1141,7 @@ export async function addReferenceVideo(url: string, label?: string, scriptId?: 
       url,
       label,
       script_id: scriptId ?? null,
+      project_id: projectId ?? null,
       created_at: new Date().toISOString()
     }
   }
@@ -1150,7 +1151,7 @@ export async function addReferenceVideo(url: string, label?: string, scriptId?: 
     const res = await fetch(`${baseOrigin}/api/reference-videos`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, label, user_id: user.id, script_id: scriptId ?? null })
+      body: JSON.stringify({ url, label, user_id: user.id, script_id: scriptId ?? null, project_id: projectId ?? null })
     })
     if (!res.ok) {
       const err = await res.json().catch(() => null)
@@ -1164,7 +1165,7 @@ export async function addReferenceVideo(url: string, label?: string, scriptId?: 
   }
 }
 
-export async function getReferenceVideos(limit = 10, before?: string, scriptId?: string): Promise<ReferenceVideo[]> {
+export async function getReferenceVideos(limit = 10, before?: string, scriptId?: string, projectId?: string): Promise<ReferenceVideo[]> {
   const user = getCurrentUser()
 
   if (isDemoMode) {
@@ -1175,6 +1176,7 @@ export async function getReferenceVideos(limit = 10, before?: string, scriptId?:
     const params = new URLSearchParams({ user_id: user.id, limit: String(limit) })
     if (before) params.set('before', before)
     if (scriptId) params.set('script_id', scriptId)
+    if (projectId) params.set('project_id', projectId)
     const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
     const res = await fetch(`${baseOrigin}/api/reference-videos?${params.toString()}`)
     if (!res.ok) {
@@ -1225,6 +1227,7 @@ export async function updateReferenceVideoLabel(id: string, label: string): Prom
       url: '',
       label,
       script_id: null,
+      project_id: null,
       created_at: new Date().toISOString()
     }
   }

@@ -70,6 +70,7 @@ export interface ReferenceVideo {
   url: string
   label?: string
   script_id?: string | null
+  project_id?: string | null
   created_at: string
 }
 

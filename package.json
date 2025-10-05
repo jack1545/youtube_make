@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "migrate:refs": "node scripts/migrate-reference-images.mjs",
+    "migrate:refvideos": "node scripts/migrate-reference-videos.mjs",
     "sync:refs": "node scripts/sync-reference-images-to-mongo.mjs",
     "sync:all": "node scripts/sync-supabase-to-mongo.mjs"
   },

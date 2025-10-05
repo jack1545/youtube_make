@@ -3,7 +3,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { generateBatchImages } from '@/lib/doubao'
 import { createVeo3Job } from '@/lib/veo3'
-import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject, updateReferenceImageLabel, addReferenceImageLabel, removeReferenceImageLabel, updateScript, updateGeneratedImage, addReferenceVideo, getReferenceVideos, removeReferenceVideo, addReferenceFolder, getReferenceFolders, getReferenceImagesByLabel, deleteReferenceFolder, renameReferenceFolder, deleteScript } from '@/lib/db'
+import { addReferenceImage, getReferenceImages, removeReferenceImage, createProject, createScript, createGeneratedImage, createGeneratedVideo, updateGeneratedVideoStatus, getProjects, getScripts, getGeneratedImages, getGeneratedVideos, updateProjectName, deleteProject, updateReferenceImageLabel, addReferenceImageLabel, removeReferenceImageLabel, updateScript, updateGeneratedImage, addReferenceVideo, getReferenceVideos, removeReferenceVideo, updateReferenceVideoLabel, addReferenceFolder, getReferenceFolders, getReferenceImagesByLabel, deleteReferenceFolder, renameReferenceFolder, deleteScript } from '@/lib/db'
 import type { ReferenceImage, ScriptSegment as DbScriptSegment, Project, Script, GeneratedImage, GeneratedVideo, ReferenceVideo, ReferenceFolder } from '@/lib/types'
 import { supabase, isDemoMode } from '@/lib/supabase'
 import ReactMarkdown from 'react-markdown'
@@ -1183,9 +1183,12 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
   const activeTaskCount = useMemo(() => tasks.filter(t => t.status === 'running' || t.status === 'pending').length, [tasks])
   const currentScriptName = useMemo(() => {
     try {
-      // existingScripts 可能在上文定义并维护
+      // existingScripts 可能在上文定义并维护；Script 不含 name 字段，使用 id 或时间作为展示
       const s = (existingScripts || []).find((x: any) => x.id === scriptId)
-      return s?.name || undefined
+      if (!s) return undefined
+      // 优先显示短 id，避免过长
+      const shortId = typeof s.id === 'string' ? s.id.slice(0, 8) : String(s.id)
+      return `Script ${shortId}`
     } catch {
       return undefined
     }
@@ -1861,18 +1864,8 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         console.warn('回填历史生成记录失败', err)
       }
 
-      // 加载脚本成功后，拉取已保存的参考视频（按脚本ID）
-      try {
-        if (script?.id) {
-          setIsLoadingRefVideos(true)
-          const videos = await getReferenceVideos(10, undefined, script.id)
-          setReferenceVideos(videos)
-        }
-      } catch (e) {
-        console.warn('加载参考视频失败', e)
-      } finally {
-        setIsLoadingRefVideos(false)
-      }
+      // 参考视频改为项目级关联，脚本加载时不再按脚本ID拉取
+      // 依赖于下方基于 projectId 的 useEffect 统一加载
     } catch (error) {
       console.error('Failed to load existing script', error)
       setStatus({ type: 'error', text: '载入历史脚本失败。' })
@@ -1886,24 +1879,24 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     }
   }, [selectedExistingProjectId, selectedExistingScriptId, handleLoadExistingScript])
 
-  // 当脚本ID变更（创建或选择）时，拉取参考视频列表
+  // 当项目ID变更时，拉取参考视频列表（项目级关联）
   useEffect(() => {
     let cancelled = false
-    async function loadRefVideosByScript() {
-      if (!scriptId) return
+    async function loadRefVideosByProject() {
+      if (!projectId) return
       try {
         setIsLoadingRefVideos(true)
-        const videos = await getReferenceVideos(10, undefined, scriptId)
+        const videos = await getReferenceVideos(50, undefined, undefined, projectId)
         if (!cancelled) setReferenceVideos(videos)
       } catch (e) {
-        console.warn('基于脚本ID加载参考视频失败', e)
+        console.warn('基于项目ID加载参考视频失败', e)
       } finally {
         if (!cancelled) setIsLoadingRefVideos(false)
       }
     }
-    loadRefVideosByScript()
+    loadRefVideosByProject()
     return () => { cancelled = true }
-  }, [scriptId])
+  }, [projectId])
 
   const toggleSelection = useCallback(
     (id: string, selected: string[], setter: (ids: string[]) => void) => {
@@ -3374,12 +3367,11 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="粘贴 YouTube 视频链接，例如 https://youtu.be/xxxx、https://www.youtube.com/watch?v=xxxx 或 https://www.youtube.com/shorts/xxxx"
             />
-            <input
-              type="text"
+            <textarea
               value={newYoutubeLabel}
               onChange={e => setNewYoutubeLabel(e.target.value)}
-              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="备注（可选）"
+              className="w-full h-24 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="备注（可选，支持多行）"
             />
             <button
               type="button"
@@ -3389,13 +3381,14 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                   setStatus({ type: 'error', text: '请输入有效的 YouTube 链接。' })
                   return
                 }
-                if (!scriptId) {
-                  setStatus({ type: 'info', text: '请先创建或选择脚本，再保存参考视频。' })
+                if (!projectId) {
+                  setStatus({ type: 'info', text: '请先创建或选择项目，再保存参考视频。' })
                   return
                 }
                 setIsAddingYoutube(true)
                 try {
-                  const item = await addReferenceVideo(newYoutubeUrl.trim(), newYoutubeLabel.trim() || undefined, scriptId)
+                  const composedLabel = (newYoutubeLabel || '').trim() || undefined
+                  const item = await addReferenceVideo(newYoutubeUrl.trim(), composedLabel, null, projectId)
                   setReferenceVideos(prev => [item, ...prev])
                   setNewYoutubeUrl('')
                   setNewYoutubeLabel('')
@@ -3434,13 +3427,14 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             {referenceVideos.map(video => {
               const vid = extractYouTubeId(video.url)
+              const remarkText = (video.label || '')
               return (
                 <div key={video.id} className="rounded-md border p-3">
                   {vid ? (
                     <div className="aspect-video w-full overflow-hidden rounded">
                       <iframe
                         src={`https://www.youtube.com/embed/${vid}`}
-                        title={video.label || 'YouTube reference'}
+                        title={remarkText || 'YouTube reference'}
                         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                         allowFullScreen
                         className="h-full w-full"
@@ -3449,24 +3443,51 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                   ) : (
                     <a href={video.url} target="_blank" rel="noreferrer" className="text-blue-600 text-sm hover:underline">{video.url}</a>
                   )}
-                  <div className="mt-2 flex items-center justify-between text-xs text-gray-600">
-                    <span>{video.label || '未命名'}</span>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          await removeReferenceVideo(video.id)
-                          setReferenceVideos(prev => prev.filter(v => v.id !== video.id))
-                        } catch (err) {
-                          console.error('删除参考视频失败', err)
-                          setStatus({ type: 'error', text: '删除参考视频失败。' })
-                        }
+                  <div className="mt-2">
+                    <label className="text-xs text-gray-700">备注</label>
+                    <textarea
+                      defaultValue={remarkText}
+                      onChange={(e) => {
+                        const val = e.target.value
+                        setReferenceVideos(prev => prev.map(v => v.id === video.id ? { ...v, label: (val || '').trim() || undefined } : v))
                       }}
-                      className="rounded border border-red-300 px-2 py-1 text-[11px] text-red-700 hover:bg-white"
-                      aria-label="删除参考视频"
-                    >
-                      删除
-                    </button>
+                      className="mt-1 h-20 w-full rounded border border-gray-300 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="填写或编辑备注（支持多行）"
+                    />
+                    <div className="mt-2 flex items-center justify-between">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const lbl = video.label || ''
+                            await updateReferenceVideoLabel(video.id, lbl)
+                            setStatus({ type: 'success', text: '备注已保存。' })
+                          } catch (err) {
+                            console.error('保存备注失败', err)
+                            setStatus({ type: 'error', text: '保存备注失败。' })
+                          }
+                        }}
+                        className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-100"
+                      >
+                        保存备注到数据库
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await removeReferenceVideo(video.id)
+                            setReferenceVideos(prev => prev.filter(v => v.id !== video.id))
+                          } catch (err) {
+                            console.error('删除参考视频失败', err)
+                            setStatus({ type: 'error', text: '删除参考视频失败。' })
+                          }
+                        }}
+                        className="rounded border border-red-300 px-2 py-1 text-[11px] text-red-700 hover:bg-white"
+                        aria-label="删除参考视频"
+                      >
+                        删除
+                      </button>
+                    </div>
                   </div>
                 </div>
               )
