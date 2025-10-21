@@ -705,6 +705,10 @@ export default function StoryboardWorkflowPage() {
   const [analysisId, setAnalysisId] = useState<string>('')
   const [isAnalysisCollapsed, setIsAnalysisCollapsed] = useState(false)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
+  // 模块折叠状态
+  const [isRefVideoCollapsed, setIsRefVideoCollapsed] = useState(true)
+const [isPromptTextCollapsed, setIsPromptTextCollapsed] = useState(true)
+const [isWorldviewCollapsed, setIsWorldviewCollapsed] = useState(true)
   // Gemini 新功能（分镜提示词CSV & 世界观改写）
   const [isPrompting, setIsPrompting] = useState(false)
 const [promptCsv, setPromptCsv] = useState('')
@@ -767,6 +771,27 @@ const [customPromptBulk, setCustomPromptBulk] = useState('')
   const [isBulkPanelOpen, setIsBulkPanelOpen] = useState(false)
   // 子脚本相关辅助定义移动到 existingScripts 初始化之后
 
+  // 右侧操作按钮容器引用，用于计算折叠面板的动态 top
+  const actionPanelRef = useRef<HTMLDivElement | null>(null)
+  // 折叠面板的动态定位（默认值用于首次渲染）
+  const [refPanelTop, setRefPanelTop] = useState<number>(220)
+  const [bulkPanelTop, setBulkPanelTop] = useState<number>(380)
+
+  useEffect(() => {
+    const updatePositions = () => {
+      const rect = actionPanelRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const spacing = 12 // 与按钮容器的间距
+      const baseTop = Math.round(rect.bottom + spacing)
+      setRefPanelTop(baseTop)
+      // 第二个面板默认再向下偏移，避免互相覆盖
+      setBulkPanelTop(baseTop + 200)
+    }
+    updatePositions()
+    window.addEventListener('resize', updatePositions)
+    return () => window.removeEventListener('resize', updatePositions)
+  }, [isRefPanelOpen, isBulkPanelOpen])
+
 const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
   const [doubaoResolution, setDoubaoResolution] = useState<DoubaoResolution>('4K')
   const [doubaoAspect, setDoubaoAspect] = useState<AspectOption>('9:16')
@@ -776,6 +801,9 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
 
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([])
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([])
+  const [shotReferenceIds, setShotReferenceIds] = useState<Record<string, string[]>>({})
+  // Drag state for top preview strip
+  const dragRefId = useRef<string | null>(null)
   // 新增：解析后的参考图 URL 映射（data: → blob:）
   const [resolvedRefUrlMap, setResolvedRefUrlMap] = useState<Record<string, string>>({})
   const [newReferenceUrl, setNewReferenceUrl] = useState('')
@@ -889,8 +917,10 @@ const [doubaoSizeMode, setDoubaoSizeMode] = useState<DoubaoSizeMode>('preset')
     { id: 'rule_default_2', find: '角色B', replace: '图2' },
     { id: 'rule_default_3', find: '角色C', replace: '图3' }
   ])
+  // 每个 Shot 独立的批量替换规则（仅作用于该 Shot 的 textarea）
+  const [shotBulkRules, setShotBulkRules] = useState<Record<string, { id: string; find: string; replace: string; isRegex?: boolean }[]>>({})
   const [videoJobs, setVideoJobs] = useState<Record<string, VideoJobState>>({})
-  const [veoModel, setVeoModel] = useState('veo3-fast-frames')
+  const [veoModel, setVeoModel] = useState('veo3.1')
   const [veoAspectRatio, setVeoAspectRatio] = useState<'16:9' | '9:16'>('9:16')
   const [veoEnhancePrompt, setVeoEnhancePrompt] = useState(true)
   const [veoUpsample, setVeoUpsample] = useState(false)
@@ -1123,6 +1153,8 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     scriptId?: string | null
     scriptName?: string
     shotCount: number
+    // 单任务价格（人民币），按当前选择/模型计算
+    price?: number
     status: TaskStatus
     progress: number // 0..1
     createdAt: number
@@ -1153,6 +1185,15 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
   const enqueueTask = useCallback((payload: Omit<TaskItem, 'id' | 'createdAt' | 'updatedAt' | 'status' | 'progress'> & { status?: TaskStatus }) => {
     const id = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const now = Date.now()
+    // 按类型与模型计算单任务价格
+    let computedPrice: number | undefined
+    if (payload.type === 'image') {
+      computedPrice = Number((0.12 * (payload.shotCount || 0)).toFixed(2))
+    } else if (payload.type === 'video') {
+      const model = String((payload.params as any)?.model || '')
+      const isV31 = model.startsWith('veo3.1')
+      if (isV31) computedPrice = Number((0.49 * (payload.shotCount || 0)).toFixed(2))
+    }
     const item: TaskItem = {
       id,
       type: payload.type,
@@ -1160,6 +1201,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
       scriptId: payload.scriptId,
       scriptName: payload.scriptName,
       shotCount: payload.shotCount,
+      price: computedPrice,
       status: payload.status ?? 'running',
       progress: 0,
       createdAt: now,
@@ -2053,7 +2095,12 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
 
       setGeneratingShotIds(prev => ({ ...prev, [segment.id]: true }))
       try {
-        const referenceUrls = selectedReferenceImages.map(image => image.url)
+        const perShotRefUrls = Array.isArray((segment as any).referenceImages)
+          ? ((segment as any).referenceImages as { url: string }[]).map(img => img.url)
+          : []
+        const referenceUrls = (perShotRefUrls && perShotRefUrls.length > 0)
+          ? perShotRefUrls
+          : selectedReferenceImages.map(image => image.url)
 
         const [result] = await generateBatchImages(
           [
@@ -2111,6 +2158,181 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     },
     [doubaoSizeValue, doubaoSizeError, doubaoSizeLabel, selectedReferenceImages, setImageResults, setStatus, enqueueTask, updateTask, failTask, currentScriptName]
   )
+
+  // 将该 Shot 的批量替换规则应用到其 textarea
+  const applyShotBulkReplace = useCallback((segment: StoryboardSegment) => {
+    const rawRules = shotBulkRules[segment.id] || []
+    const rules = rawRules.length
+      ? rawRules
+      : [{ id: `default_${segment.id}`, find: '角色A', replace: '图1', isRegex: false }]
+
+    let text = segment.promptText || ''
+    for (const r of rules) {
+      const find = String((r as any).find ?? (r as any).pattern ?? '')
+      const repl = String((r as any).replace ?? (r as any).replacement ?? '')
+      if (!find) continue
+      const useRegex = !!(r as any).isRegex
+      if (useRegex) {
+        try {
+          const re = new RegExp(find, 'g')
+          text = text.replace(re, repl)
+        } catch {
+          text = text.split(find).join(repl)
+        }
+      } else {
+        text = text.split(find).join(repl)
+      }
+    }
+    setSegments(prev => prev.map(s => (s.id === segment.id ? { ...s, promptText: text } : s)))
+    setStatus({ type: 'success', text: '已应用批量替换到该 Shot。' })
+  }, [shotBulkRules])
+
+  // 保存单个 Shot（仅 content，不修改 raw_text）
+  const handleSaveSingleShot = useCallback(async (segment: StoryboardSegment) => {
+    try {
+      let ensuredProjectId = projectId
+      if (!ensuredProjectId) {
+        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+        const defaultName = `Storyboard Project ${stamp}`
+        const created = await createProject(defaultName, 'Auto-created when saving a single shot')
+        ensuredProjectId = created.id
+        setProjectId(created.id)
+        setProjectName(created.name)
+        setSelectedExistingProjectId(created.id)
+        try { const refreshed = await getProjects(); setExistingProjects(refreshed) } catch { /* ignore */ }
+      }
+
+      const baseContent: any[] = (scriptId
+        ? (existingScripts.find(s => s.id === scriptId)?.content || [])
+        : segments.map((s, idx) => ({
+            id: s.id || `shot-${idx + 1}`,
+            scene: String(s.prompt?.subject?.action ?? s.prompt?.environment ?? ''),
+            prompt: String(s.promptText ?? ''),
+            characters: [] as string[],
+            setting: String(s.prompt?.environment ?? ''),
+            mood: String(s.prompt?.time_of_day ?? ''),
+            prompt_detail: s.prompt
+              ? {
+                  subject: s.prompt.subject
+                    ? {
+                        characters_present: String(s.prompt.subject.characters_present ?? ''),
+                        expression: String(s.prompt.subject.expression ?? ''),
+                        action: String(s.prompt.subject.action ?? '')
+                      }
+                    : undefined,
+                  environment: String(s.prompt.environment ?? ''),
+                  time_of_day: String(s.prompt.time_of_day ?? ''),
+                  weather: String(s.prompt.weather ?? ''),
+                  camera_angle: String(s.prompt.camera_angle ?? ''),
+                  shot_size: String(s.prompt.shot_size ?? '')
+                }
+              : undefined
+          })))
+
+      const idx = Math.max(0, (segment.shotNumber ?? (segments.findIndex(s => s.id === segment.id) + 1)) - 1)
+      const updatedSeg = {
+        id: segment.id || baseContent[idx]?.id || `shot-${idx + 1}`,
+        scene: String(segment.prompt?.subject?.action ?? segment.prompt?.environment ?? ''),
+        prompt: String(segment.promptText ?? ''),
+        characters: Array.isArray(baseContent[idx]?.characters) ? baseContent[idx].characters : [],
+        setting: String(segment.prompt?.environment ?? ''),
+        mood: String(segment.prompt?.time_of_day ?? ''),
+        prompt_detail: segment.prompt
+          ? {
+              subject: segment.prompt.subject
+                ? {
+                    characters_present: String(segment.prompt.subject.characters_present ?? ''),
+                    expression: String(segment.prompt.subject.expression ?? ''),
+                    action: String(segment.prompt.subject.action ?? '')
+                  }
+                : undefined,
+              environment: String(segment.prompt.environment ?? ''),
+              time_of_day: String(segment.prompt.time_of_day ?? ''),
+              weather: String(segment.prompt.weather ?? ''),
+              camera_angle: String(segment.prompt.camera_angle ?? ''),
+              shot_size: String(segment.prompt.shot_size ?? '')
+            }
+          : undefined
+      }
+
+      const nextContent = baseContent.slice()
+      if (idx < nextContent.length) nextContent[idx] = updatedSeg
+      else nextContent.push(updatedSeg)
+
+      if (!scriptId) {
+        const created = await createScript(ensuredProjectId!, nextContent)
+        setScriptId(created.id)
+        try { const scripts = await getScripts(ensuredProjectId!); setExistingScripts(scripts) } catch { /* ignore */ }
+        setStatus({ type: 'success', text: `已创建脚本并保存 Shot ${segment.shotNumber}。` })
+      } else {
+        const updated = await updateScript(scriptId, nextContent)
+        setScriptId(updated.id)
+        setStatus({ type: 'success', text: `已保存 Shot ${segment.shotNumber}（不影响原始脚本文本）。` })
+      }
+    } catch (e) {
+      console.error('保存单个 Shot 失败', e)
+      setStatus({ type: 'error', text: '保存该 Shot 失败。' })
+    }
+  }, [projectId, scriptId, existingScripts, segments])
+
+  // 保存所有分镜内容（不修改原始脚本文本）
+  const handleSaveAllShotsContentOnly = useCallback(async () => {
+    try {
+      if (!segments.length) {
+        setStatus({ type: 'info', text: '请先在 Step 1 解析分镜脚本。' })
+        return
+      }
+      let ensuredProjectId = projectId
+      if (!ensuredProjectId) {
+        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+        const defaultName = `Storyboard Project ${stamp}`
+        const newProject = await createProject(defaultName, 'Auto-created when saving shots only')
+        ensuredProjectId = newProject.id
+        setProjectId(newProject.id)
+        setProjectName(newProject.name)
+        setSelectedExistingProjectId(newProject.id)
+        try { const refreshed = await getProjects(); setExistingProjects(refreshed) } catch { /* ignore */ }
+      }
+
+      const segmentsMapped = segments.map((seg, idx) => ({
+        id: seg.id || `shot-${idx + 1}`,
+        scene: String(seg.prompt?.subject?.action ?? seg.prompt?.environment ?? ''),
+        prompt: String(seg.promptText ?? ''),
+        characters: [] as string[],
+        setting: String(seg.prompt?.environment ?? ''),
+        mood: String(seg.prompt?.time_of_day ?? ''),
+        prompt_detail: seg.prompt
+          ? {
+              subject: seg.prompt.subject
+                ? {
+                    characters_present: String(seg.prompt.subject.characters_present ?? ''),
+                    expression: String(seg.prompt.subject.expression ?? ''),
+                    action: String(seg.prompt.subject.action ?? '')
+                  }
+                : undefined,
+              environment: String(seg.prompt.environment ?? ''),
+              time_of_day: String(seg.prompt.time_of_day ?? ''),
+              weather: String(seg.prompt.weather ?? ''),
+              camera_angle: String(seg.prompt.camera_angle ?? ''),
+              shot_size: String(seg.prompt.shot_size ?? '')
+            }
+          : undefined
+      }))
+
+      if (!scriptId) {
+        const created = await createScript(ensuredProjectId!, segmentsMapped)
+        setScriptId(created.id)
+        setStatus({ type: 'success', text: '已创建脚本并保存所有分镜内容。' })
+      } else {
+        const updated = await updateScript(scriptId, segmentsMapped)
+        setScriptId(updated.id)
+        setStatus({ type: 'success', text: '已保存分镜内容（不影响原始脚本文本）。' })
+      }
+    } catch (e) {
+      console.error('保存分镜内容失败', e)
+      setStatus({ type: 'error', text: '保存分镜内容失败。' })
+    }
+  }, [segments, projectId, scriptId])
 
   const handleGenerateImages = useCallback(async () => {
     if (!segments.length) {
@@ -2295,7 +2517,13 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         const actionOnly = extractActionText(target, image.prompt)
         const promptForVideo = customPrompt && customPrompt.length > 0
           ? customPrompt
-          : (actionOnly || image.prompt || formatPromptForModel(target))
+          : (actionOnly || '')
+
+        if (!promptForVideo || !promptForVideo.trim()) {
+          nextJobs[target.id] = { status: 'error', error: '该分镜没有“动作”提示词，无法提交视频任务。' }
+          setVideoJobs({ ...nextJobs })
+          continue
+        }
 
         nextJobs[target.id] = { status: 'pending' }
         setVideoJobs({ ...nextJobs })
@@ -2379,8 +2607,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
       const img = imageResults[seg.id]
       const base = (videoPromptOverrides[seg.id]?.trim())
         || extractActionText(seg, img?.prompt)
-        || img?.prompt
-        || formatPromptForModel(seg)
+        || ''
       nextOverrides[seg.id] = (base || '').split(find).join(replace)
     })
 
@@ -2519,7 +2746,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                           <div className={statusColor}>{t.status}</div>
                         </div>
                         <div className="mt-1 text-[11px] text-gray-600">
-                          {t.scriptName || '未命名脚本'} · {t.shotCount} 条
+                          {t.scriptName || '未命名脚本'} · {t.shotCount} 条{typeof t.price === 'number' ? ` · ¥${t.price.toFixed(2)}` : ''}
                         </div>
                         <div className="mt-2 h-2 w-full rounded bg-gray-200">
                           <div
@@ -2536,9 +2763,10 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                 </div>
               )}
             </div>
+
           )}
+          </div>
         </div>
-      </div>
       <header className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
         <h1 className="text-2xl font-semibold text-gray-900">Storyboard prompt workflow</h1>
         <p className="mt-2 text-sm text-gray-600">
@@ -2705,13 +2933,13 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
 
       {/* 右侧悬浮参考图折叠面板 */}
       {referenceImages.length > 0 && (
-        <div className={`fixed right-4 top-[calc(50%-220px)] z-50 hidden md:block ${isRefPanelOpen ? 'w-[28rem]' : 'w-72'}`}>
+        <div className={`fixed right-4 z-30 hidden md:block ${isRefPanelOpen ? 'w-[28rem]' : 'w-72'}`} style={{ top: refPanelTop }}>
           {/* 参考图折叠面板 */}
-          <div className="rounded-lg border border-gray-200 bg-white/95 shadow">
+          <div className="rounded-lg bg-white">
             <button
               type="button"
               onClick={() => setIsRefPanelOpen(prev => !prev)}
-              className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              className="hidden"
               aria-expanded={isRefPanelOpen}
             >
               <span>Reference images（按顺序使用⬇）</span>
@@ -2788,14 +3016,14 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           </div>
 
           {/* 右侧悬浮：预览镜头批量替换（默认折叠） */}
-          <div className="mt-2 rounded-lg border border-gray-200 bg-white/95 shadow">
+          <div className={`fixed right-4 z-40 hidden md:block ${isBulkPanelOpen ? 'w-[28rem]' : 'w-72'} rounded-lg bg-white`} style={{ top: bulkPanelTop }}>
             <button
               type="button"
               onClick={() => setIsBulkPanelOpen(prev => !prev)}
-              className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              className="hidden"
               aria-expanded={isBulkPanelOpen}
             >
-              <span>批量替换原始脚本文本（仅 textarea）</span>
+              <span>替换原始脚本文本</span>
             </button>
             {isBulkPanelOpen && (
               <div className="px-3 pb-3">
@@ -2873,15 +3101,106 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
       )}
 
       {/* Floating right-side step tabs（下移以避免与右侧按钮重叠） */}
-      <nav className="fixed right-4 top-[calc(50%+140px)] z-40 hidden md:flex md:w-40 md:flex-col md:space-y-2">
+      <nav className="fixed right-4 top-[calc(50%+200px)] z-20 hidden md:flex md:w-40 md:flex-col md:space-y-2">
         <a href="#step-1" className="block w-full rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 1 解析提示词</a>
         <a href="#step-2" className="block w-full rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 2 参考图 | 分镜图</a>
         <a href="#step-3" className="block w-full rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 3 设置图片</a>
         <a href="#step-4" className="block w-full rounded bg-white/90 px-3 py-2 text-xs shadow ring-1 ring-gray-200 hover:bg-white">Step 4 生成视频</a>
       </nav>
 
-      {/* 右侧悬浮操作按钮（生成与下载） */}
-      <div className="fixed right-4 top-24 z-40 hidden md:flex md:flex-col md:gap-3">
+      {/* 右侧悬浮操作按钮（保存、生成与下载） */}
+      <div className="fixed right-4 top-24 z-[60] hidden md:flex md:flex-col md:gap-3" ref={actionPanelRef}>
+        {/* 保存原始脚本 */}
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              const segmentsMapped = segments.map(s => ({
+                id: s.id,
+                scene: String(s.prompt?.subject?.action ?? s.prompt?.environment ?? ''),
+                prompt: String(s.promptText ?? ''),
+                characters: [] as string[],
+                setting: String(s.prompt?.environment ?? ''),
+                mood: String(s.prompt?.time_of_day ?? '')
+              }))
+              let ensuredProjectId = projectId
+              try {
+                const projects = await getProjects()
+                const exists = ensuredProjectId ? projects.some(p => p.id === ensuredProjectId) : false
+                if (!exists) {
+                  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                  const defaultName = `Storyboard Project ${stamp}`
+                  const newProject = await createProject(defaultName, 'Auto-created when saving original script')
+                  ensuredProjectId = newProject.id
+                  setProjectId(newProject.id)
+                  setProjectName(newProject.name)
+                  setSelectedExistingProjectId(newProject.id)
+                  const refreshed = await getProjects()
+                  setExistingProjects(refreshed)
+                  setStatus({ type: 'success', text: `已自动创建项目：${newProject.name}` })
+                }
+              } catch (verifyErr) {
+                console.warn('校验项目存在性失败，将尝试创建默认项目以继续保存。', verifyErr)
+                if (!ensuredProjectId) {
+                  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                  const defaultName = `Storyboard Project ${stamp}`
+                  const fallbackProject = await createProject(defaultName, 'Auto-created when saving original script')
+                  ensuredProjectId = fallbackProject.id
+                  setProjectId(fallbackProject.id)
+                  setProjectName(fallbackProject.name)
+                  setSelectedExistingProjectId(fallbackProject.id)
+                  const refreshed = await getProjects().catch(() => [])
+                  if (Array.isArray(refreshed)) setExistingProjects(refreshed)
+                  setStatus({ type: 'success', text: `已自动创建项目：${fallbackProject.name}` })
+                }
+              }
+              if (!scriptId) {
+                let script
+                try {
+                  script = await createScript(ensuredProjectId!, segmentsMapped, rawJson)
+                } catch (err: any) {
+                  const msg = String(err?.message || '')
+                  if (msg.includes('Invalid project_id')) {
+                    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+                    const defaultName = `Storyboard Project ${stamp}`
+                    const newProject = await createProject(defaultName, 'Auto-created on retry when saving original script')
+                    ensuredProjectId = newProject.id
+                    setProjectId(newProject.id)
+                    setProjectName(newProject.name)
+                    setSelectedExistingProjectId(newProject.id)
+                    const refreshed = await getProjects()
+                    setExistingProjects(refreshed)
+                    script = await createScript(ensuredProjectId!, segmentsMapped, rawJson)
+                  } else {
+                    throw err
+                  }
+                }
+                setScriptId(script.id)
+                setStatus({ type: 'success', text: '脚本已创建并保存原始脚本与分镜。' })
+              } else {
+                const updated = await updateScript(scriptId, segmentsMapped, rawJson)
+                setStatus({ type: 'success', text: '原始脚本与分镜已更新。' })
+                setScriptId(updated.id)
+              }
+            } catch (e) {
+              console.error('更新/创建脚本失败', e)
+              setStatus({ type: 'error', text: '保存原始脚本失败。' })
+            }
+          }}
+          disabled={!rawJson.trim()}
+          className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          保存原始脚本
+        </button>
+        {/* 保存分镜（仅内容） */}
+        <button
+          type="button"
+          onClick={handleSaveAllShotsContentOnly}
+          className="rounded-md bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          保存分镜（仅内容）
+        </button>
+        {/* 生成图片 */}
         <button
           type="button"
           onClick={handleGenerateImages}
@@ -2890,6 +3209,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         >
           {isGeneratingImages ? `Generating ${imageProgress}%` : 'Generate images'}
         </button>
+        {/* 下载图片 */}
         <button
           type="button"
           onClick={handleBulkDownloadImages}
@@ -2898,6 +3218,22 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           title="下载已生成的图片（按分镜号命名）"
         >
           {isDownloadingImages ? 'Downloading...' : `Download images (${Object.keys(imageResults).length})`}
+        </button>
+        {/* 参考图与原始脚本批量替换开关（移至右侧悬浮容器，避免遮盖） */}
+        <button
+          type="button"
+          onClick={() => setIsRefPanelOpen(prev => !prev)}
+          className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs text-gray-700 hover:bg-gray-50 flex items-center justify-between"
+        >
+          <span>Reference images</span>
+          <span className="ml-2 inline-block rounded bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600">{selectedReferenceImages.length}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setIsBulkPanelOpen(prev => !prev)}
+          className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs text-gray-700 hover:bg-gray-50"
+        >
+          替换原始脚本文本
         </button>
       </div>
 
@@ -3049,9 +3385,16 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                 }
               }}
               disabled={!rawJson.trim()}
-              className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-600"
+              className="hidden md:hidden rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-600"
             >
               保存原始脚本
+            </button>
+            <button
+              type="button"
+              onClick={handleSaveAllShotsContentOnly}
+              className="hidden md:hidden ml-2 rounded-md bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-600"
+            >
+              保存分镜（仅内容）
             </button>
           </div>
         </div>
@@ -3357,8 +3700,21 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         <div className="mt-4 rounded-md border border-dashed p-4">
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-gray-800">YouTube参考视频</h3>
-            {isLoadingRefVideos && <span className="text-xs text-gray-500">加载参考视频…</span>}
+            <div className="flex items-center gap-2">
+              {isLoadingRefVideos && <span className="text-xs text-gray-500">加载参考视频…</span>}
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                onClick={() => setIsRefVideoCollapsed(v => !v)}
+                aria-expanded={!isRefVideoCollapsed}
+                title={isRefVideoCollapsed ? '展开参考视频模块' : '收起参考视频模块'}
+              >
+                {isRefVideoCollapsed ? '展开' : '收起'}
+              </button>
+            </div>
           </div>
+          {!isRefVideoCollapsed && (
+            <>
           <div className="grid gap-3 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_auto]">
             <input
               type="url"
@@ -3496,6 +3852,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               <div className="rounded-md border border-dashed p-4 text-center text-xs text-gray-500">尚未保存参考视频。</div>
             )}
           </div>
+          </>)}
         </div>
         <div className="rounded-md border border-gray-200 bg-gray-50 p-4">
           <div className="mb-2 flex items-center justify-between">
@@ -3556,6 +3913,15 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-gray-800">Gemini：生成视频分镜提示词（文本）</h3>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                onClick={() => setIsPromptTextCollapsed(v => !v)}
+                aria-expanded={!isPromptTextCollapsed}
+                title={isPromptTextCollapsed ? '展开分镜提示词模块' : '收起分镜提示词模块'}
+              >
+                {isPromptTextCollapsed ? '展开' : '收起'}
+              </button>
               <button
                 type="button"
                 className="rounded border border-blue-300 px-2 py-1 text-[11px] text-blue-700 hover:bg-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
@@ -3766,6 +4132,8 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               </button>
             </div>
           </div>
+          {!isPromptTextCollapsed && (
+            <>
           {promptError && <p className="text-xs text-red-600">{promptError}</p>}
           {/* 自定义多行分镜文本输入 */}
           <div className="mb-2 rounded-md border border-blue-200 bg-white p-3">
@@ -3915,6 +4283,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           ) : (
             <p className="text-xs text-blue-700">粘贴原始脚本后点击“生成分镜文本”。输出为纯文本，每行一条，不会直接更改分镜预览。</p>
           )}
+          </>)}
         </div>
 
         {/* Gemini: 世界观改写脚本 */}
@@ -3922,6 +4291,15 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-gray-800">Gemini：世界观改写脚本（CSV）</h3>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
+                onClick={() => setIsWorldviewCollapsed(v => !v)}
+                aria-expanded={!isWorldviewCollapsed}
+                title={isWorldviewCollapsed ? '展开世界观改写模块' : '收起世界观改写模块'}
+              >
+                {isWorldviewCollapsed ? '展开' : '收起'}
+              </button>
               <select
                 value={worldview}
                 onChange={e => setWorldview(e.target.value)}
@@ -4112,6 +4490,8 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
               </button>
             </div>
           </div>
+          {!isWorldviewCollapsed && (
+            <>
           {/* 世界观细节编辑：核心设定 / 关键元素 / 参考案例 */}
           <div className="mb-2 grid grid-cols-1 gap-2 md:grid-cols-3">
             <div>
@@ -4290,6 +4670,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
           ) : (
             <p className="text-xs text-indigo-700">选择世界观并填写“核心设定/关键元素/参考案例”，点击“应用世界观并改写为CSV”。输出为CSV文本。</p>
           )}
+          </>)}
         </div>
 
       {/* 历史模块：在回填不完整时显示（可折叠） */}
@@ -4753,39 +5134,183 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                     </label>
                   </div>
                 </div>
-                <div className="rounded-md bg-gray-50 p-3 text-sm leading-relaxed text-gray-600 whitespace-pre-wrap">
-                  {segment.promptText}
+                {/* Shot 参考图预览（支持拖拽排序） */}
+                <div className="flex flex-wrap items-center gap-2">
+                  {(
+                    Array.isArray((segment as any).referenceImages) && (segment as any).referenceImages.length
+                      ? ((segment as any).referenceImages as { id?: string; url: string }[])
+                      : selectedReferenceImages
+                  ).slice(0, 8).map((img, idx) => {
+                    const imgId = (img as any).id ?? idx.toString()
+                    const imgUrl = (img as any).url ?? (img as any).image_url ?? img.url
+                    return (
+                      <div key={imgId} className="relative group">
+                        <img
+                          src={imgUrl}
+                          alt="ref"
+                          className="h-12 w-12 rounded object-cover ring-1 ring-gray-300"
+                          draggable
+                          onDragStart={() => { dragRefId.current = (img as any).id ?? null }}
+                          onDragOver={(e) => { e.preventDefault() }}
+                          onDrop={(e) => {
+                            e.preventDefault()
+                            const fromId = dragRefId.current
+                            const toId = (img as any).id
+                            dragRefId.current = null
+                            if (!fromId || !toId || fromId === toId) return
+                            setShotReferenceIds(prev => {
+                              const baseOrder = (Array.isArray((segment as any).referenceImages) && (segment as any).referenceImages.length
+                                ? ((segment as any).referenceImages as any[]).map(it => it.id)
+                                : selectedReferenceImages.map(it => it.id))
+                              if (!baseOrder.includes(fromId) || !baseOrder.includes(toId)) return prev
+                              const nextOrder = baseOrder.slice()
+                              const fromIdx = nextOrder.indexOf(fromId)
+                              const toIdx = nextOrder.indexOf(toId)
+                              nextOrder.splice(toIdx, 0, nextOrder.splice(fromIdx, 1)[0])
+                              setSegments(sPrev => sPrev.map(s => (s.id === segment.id ? {
+                                ...s,
+                                referenceImages: nextOrder.map(id => {
+                                  const src = selectedReferenceImages.find(it => it.id === id) || (((segment as any).referenceImages as any[])?.find(it => it.id === id))
+                                  const url = resolvedRefUrlMap[id] ?? src?.url
+                                  return { id, url }
+                                })
+                              } : s)))
+                              return { ...prev, [segment.id]: nextOrder }
+                            })
+                          }}
+                          onDragEnd={() => { dragRefId.current = null }}
+                          onClick={() => setRefZoomUrl(imgUrl)}
+                          title="拖拽以调整顺序"
+                        />
+                        <button
+                          type="button"
+                          className="absolute -top-1 -right-1 hidden group-hover:block rounded-full bg-white/90 ring-1 ring-gray-300 text-[10px] leading-none px-1"
+                          title="移除此参考图"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setShotReferenceIds(prev => {
+                              const baseOrder = (Array.isArray((segment as any).referenceImages) && (segment as any).referenceImages.length
+                                ? ((segment as any).referenceImages as any[]).map(it => it.id)
+                                : selectedReferenceImages.map(it => it.id))
+                              if (!baseOrder.includes(imgId)) return prev
+                              const nextOrder = baseOrder.filter(id => id !== imgId)
+                              setSegments(sPrev => sPrev.map(s => (s.id === segment.id ? {
+                                ...s,
+                                referenceImages: nextOrder.map(id => {
+                                  const src = selectedReferenceImages.find(it => it.id === id) || (((segment as any).referenceImages as any[])?.find(it => it.id === id))
+                                  const url = resolvedRefUrlMap[id] ?? src?.url
+                                  return { id, url }
+                                })
+                              } : s)))
+                              return { ...prev, [segment.id]: nextOrder }
+                            })
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )
+                  })}
+                  {(!Array.isArray((segment as any).referenceImages) || !(segment as any).referenceImages.length) && selectedReferenceImages.length === 0 && (
+                    <span className="text-[11px] text-gray-400">暂无参考图</span>
+                  )}
                 </div>
-                <details className="group">
-                  <summary className="cursor-pointer select-none text-xs text-blue-600 hover:underline">编辑 Shot 文本</summary>
-                  <div className="mt-2 space-y-2">
-                    <div>
-                      <label htmlFor={`shot-text-${segment.id}`} className="block text-xs font-medium text-gray-600">Shot 文本</label>
-                      <textarea
-                        id={`shot-text-${segment.id}`}
-                        value={segment.promptText}
-                        onChange={e => {
-                          const updated = { ...segment, promptText: e.target.value }
-                          setSegments(prev => prev.map(s => (s.id === segment.id ? updated : s)))
-                        }}
-                        className="h-24 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="可直接编辑文本"
-                      />
-                    </div>
-                    <div>
-                      <label htmlFor={`shot-characters-${segment.id}`} className="block text-xs font-medium text-gray-600">Characters（角色）</label>
+                <textarea
+                  value={segment.promptText ?? ''}
+                  onChange={e => {
+                    const updated = { ...segment, promptText: e.target.value }
+                    setSegments(prev => prev.map(s => (s.id === segment.id ? updated : s)))
+                  }}
+                  className="min-h-[160px] w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="在此直接编辑 Shot 文本"
+                 />
+                {/* Shot 局部批量替换 UI */}
+                <div className="mt-2 rounded-md border border-gray-200 p-2">
+                  <div className="mb-1 text-xs text-gray-600">该 Shot 的批量替换规则</div>
+{(() => {
+  const text = segment.promptText || ''
+  const matched = (bulkRules || []).filter(r => (r.find || '') && text.includes(r.find))
+  if (!matched.length) return null
+  return (
+    <p className="mb-2 text-[11px] text-gray-500">
+      命中的全局规则：{matched.map(r => `${r.find} → ${r.replace}`).join('；')}
+    </p>
+  )
+})()}
+                  {(shotBulkRules[segment.id!] ?? []).map((rule, idx) => (
+                    <div key={rule.id ?? idx} className="mb-2 flex items-center gap-2">
                       <input
-                        id={`shot-characters-${segment.id}`}
                         type="text"
-                        value={segment.prompt?.subject?.characters_present ?? ''}
-                        readOnly
-                        disabled
-                        className="w-full rounded-md border border-gray-300 px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="单个镜头编辑已禁用"
+                        value={rule.find ?? (rule as any).pattern ?? ''}
+                        onChange={e => {
+                          const next = [...(shotBulkRules[segment.id!] ?? [])]
+                          next[idx] = { ...rule, find: e.target.value }
+                          setShotBulkRules(prev => ({ ...prev, [segment.id!]: next }))
+                        }}
+                        placeholder="匹配内容"
+                        className="w-1/3 rounded-md border border-gray-300 px-2 py-1 text-xs"
                       />
+                      <input
+                        type="text"
+                        value={rule.replace ?? (rule as any).replacement ?? ''}
+                        onChange={e => {
+                          const next = [...(shotBulkRules[segment.id!] ?? [])]
+                          next[idx] = { ...rule, replace: e.target.value }
+                          setShotBulkRules(prev => ({ ...prev, [segment.id!]: next }))
+                        }}
+                        placeholder="替换为"
+                        className="w-1/3 rounded-md border border-gray-300 px-2 py-1 text-xs"
+                      />
+                      <label className="flex items-center gap-1 text-xs text-gray-600">
+                        <input
+                          type="checkbox"
+                          checked={!!(rule as any).isRegex}
+                          onChange={e => {
+                            const next = [...(shotBulkRules[segment.id!] ?? [])]
+                            next[idx] = { ...rule, isRegex: e.target.checked }
+                            setShotBulkRules(prev => ({ ...prev, [segment.id!]: next }))
+                          }}
+                        />
+                        正则
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = [...(shotBulkRules[segment.id!] ?? [])]
+                          next.splice(idx, 1)
+                          setShotBulkRules(prev => ({ ...prev, [segment.id!]: next }))
+                        }}
+                        className="rounded-md border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50"
+                      >
+                        删除
+                      </button>
                     </div>
+                  ))}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const add = { id: (globalThis.crypto?.randomUUID?.() ?? `shot_rule_${Date.now()}`), find: '', replace: '', isRegex: false }
+                        const prevList = shotBulkRules[segment.id!] ?? []
+                        const next = prevList.length === 0
+                          ? [ { id: `default_${segment.id}`, find: '角色A', replace: '图1', isRegex: false }, add ]
+                          : [ ...prevList, add ]
+                        setShotBulkRules(prev => ({ ...prev, [segment.id!]: next }))
+                      }}
+                      className="rounded-md border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50"
+                    >
+                      新增规则
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyShotBulkReplace(segment)}
+                      className="rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                    >
+                      应用到该 Shot
+                    </button>
                   </div>
-                </details>
+                </div>
+
                 {segment.prompt?.subject?.characters_present && (
                   <p className="text-xs text-gray-500">Characters: {segment.prompt.subject.characters_present}</p>
                 )}
@@ -4804,6 +5329,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                 ) : (
                   <p className="text-[11px] text-gray-400">No image generated yet.</p>
                 )}
+
                 <button
                   type="button"
                   onClick={() => handleGenerateImageForShot(segment)}
@@ -4811,6 +5337,14 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                   className="self-start rounded-md border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {buttonLabel}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSaveSingleShot(segment)}
+                  disabled={isShotGenerating || isGeneratingImages}
+                  className="ml-2 self-start rounded-md border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  保存该 Shot
                 </button>
               </div>
             )
@@ -5463,6 +5997,9 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                 onChange={event => setVeoModel(event.target.value)}
                 className="ml-2 rounded-md border border-gray-300 px-2 py-1 text-sm"
               >
+                <option value="veo3.1">veo3.1</option>
+                <option value="veo3.1-fast">veo3.1-fast</option>
+                <option value="veo3.1-pro">veo3.1-pro</option>
                 <option value="veo3-fast">veo3-fast</option>
                 <option value="veo3">veo3</option>
                 <option value="veo3-pro">veo3-pro</option>
@@ -5612,8 +6149,7 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             const job = videoJobs[segment.id]
             const geminiText = (segment.promptText || '').trim()
             const actionOnly = extractActionText(segment, image?.prompt)
-            const actionLabel = actionOnly ? `动作：${actionOnly}` : ''
-            const promptFallback = geminiText || actionLabel || image?.prompt || formatPromptForModel(segment)
+            const promptFallback = geminiText || actionOnly || ''
             const promptValue = videoPromptOverrides[segment.id] ?? promptFallback
             const isSelected = selectedForVideo.includes(segment.id)
             const checkboxDisabled = !image

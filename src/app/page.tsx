@@ -73,6 +73,20 @@ export default function Home() {
   const [showKeys, setShowKeys] = useState(false)
   const [isSavingKeys, setIsSavingKeys] = useState(false)
 
+  // API Key 保存模式：cache（本地浏览器缓存）或 database（持久化到数据库）
+  const [apiKeyStorageMode, setApiKeyStorageMode] = useState<'cache' | 'database'>(() => {
+    try {
+      return (localStorage.getItem('api_key_storage_mode') as 'cache' | 'database') || 'database'
+    } catch {
+      return 'database'
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('api_key_storage_mode', apiKeyStorageMode)
+    } catch { /* ignore */ }
+  }, [apiKeyStorageMode])
+
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([])
   const [newReferenceUrl, setNewReferenceUrl] = useState('')
   const [newReferenceLabel, setNewReferenceLabel] = useState('')
@@ -188,6 +202,28 @@ export default function Home() {
 
   const loadApiKeys = async () => {
     try {
+      // 根据保存模式读取配置：cache 使用浏览器 localStorage，database 走后端接口
+      if (apiKeyStorageMode === 'cache') {
+        try {
+          const raw = localStorage.getItem('api_key_settings')
+          if (raw) {
+            const settings = JSON.parse(raw)
+            setApiKeyForm({
+              gemini_api_key: settings.gemini_api_key || '',
+              doubao_api_key: settings.doubao_api_key || '',
+              veo3_api_key: settings.veo3_api_key || ''
+            })
+            setApiKeyUpdatedAt(localStorage.getItem('api_key_updated_at'))
+          } else {
+            setApiKeyForm({ gemini_api_key: '', doubao_api_key: '', veo3_api_key: '' })
+            setApiKeyUpdatedAt(null)
+          }
+        } catch (e) {
+          console.error('Failed to load API keys from cache', e)
+        }
+        return
+      }
+
       const settings = await getApiKeySettings()
       setApiKeyForm({
         gemini_api_key: settings.gemini_api_key || '',
@@ -610,9 +646,18 @@ export default function Home() {
     event.preventDefault()
     setIsSavingKeys(true)
     try {
-      const saved = await saveApiKeySettings(apiKeyForm)
-      setApiKeyUpdatedAt(saved.updated_at)
-      setStatus({ type: 'success', message: 'API Key 配置已保存。' })
+      if (apiKeyStorageMode === 'cache') {
+        // 保存到浏览器缓存（仅当前设备/浏览器可用）
+        localStorage.setItem('api_key_settings', JSON.stringify(apiKeyForm))
+        const now = new Date().toISOString()
+        localStorage.setItem('api_key_updated_at', now)
+        setApiKeyUpdatedAt(now)
+        setStatus({ type: 'success', message: 'API Key 已保存到缓存（本地）。' })
+      } else {
+        const saved = await saveApiKeySettings(apiKeyForm)
+        setApiKeyUpdatedAt(saved.updated_at)
+        setStatus({ type: 'success', message: 'API Key 配置已保存到数据库。' })
+      }
     } catch (error) {
       console.error('Failed to save API keys', error)
       setStatus({ type: 'error', message: '保存 API Key 失败。' })
@@ -739,7 +784,7 @@ export default function Home() {
           <div>
             <h2 className="text-xl font-semibold text-gray-900">API Key 设置</h2>
             <p className="mt-1 text-sm text-gray-500">
-              将 Gemini / Doubao / Veo3 的 API Key 统一保存在 Supabase，便于在工作流中安全调用。
+              可选择保存在浏览器缓存（本地）或数据库（共享，推荐生产环境）。
             </p>
           </div>
           <div className="text-sm text-gray-500">
@@ -757,6 +802,26 @@ export default function Home() {
               />
               显示明文
             </label>
+            <div className="mt-2 flex items-center gap-4 text-xs text-gray-600">
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  className="rounded border-gray-300"
+                  checked={apiKeyStorageMode === 'cache'}
+                  onChange={() => setApiKeyStorageMode('cache')}
+                />
+                保存到缓存（本地）
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  className="rounded border-gray-300"
+                  checked={apiKeyStorageMode === 'database'}
+                  onChange={() => setApiKeyStorageMode('database')}
+                />
+                保存到数据库（共享）
+              </label>
+            </div>
           </div>
         </div>
 
