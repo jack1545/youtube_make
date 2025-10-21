@@ -16,6 +16,7 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const isVercel = process.env.VERCEL === '1' || process.env.NEXT_PUBLIC_DEPLOY_TARGET === 'vercel'
   return (
     <html lang="zh">
       <body className={inter.className}>
@@ -29,8 +30,10 @@ export default function RootLayout({
                 <nav className="flex items-center gap-4 text-sm">
                   <Link href="/" className="text-gray-700 hover:text-blue-600">首页</Link>
                   <Link href="/workflows/storyboard" className="text-gray-700 hover:text-blue-600">Storyboard</Link>
-                  {/* 新增本地项目入口 */}
-                  <Link href="/workflows/local-projects" className="text-gray-700 hover:text-blue-600">本地项目</Link>
+                  {/* 新增本地项目入口（仅本地/非Vercel显示）*/}
+                  {!isVercel && (
+                    <Link href="/workflows/local-projects" className="text-gray-700 hover:text-blue-600">本地项目</Link>
+                  )}
                 </nav>
                 <div className="text-sm text-gray-500">
                   {isDemoMode ? '演示模式' : '管理员模式'}

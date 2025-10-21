@@ -5978,15 +5978,33 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
             <h2 id="step-4" className="text-lg font-semibold text-gray-900">Step 4 - Submit Veo3 videos</h2>
-            <p className="text-sm text-gray-500">Select the shots you want to convert to video. Unselected images will be downloaded using the project name.</p>
+            <p className="text-sm text-gray-500">该模块暂时封存。激活后：仅提取分镜提示词中的“动作”作为 Video prompt；未生成图片的镜头不可选。</p>
             <button
               type="button"
               className="mt-2 rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-white"
-              onClick={() => setIsStep4Collapsed(v => !v)}
+              onClick={() => {
+                setIsStep4Collapsed(prev => {
+                  const next = !prev
+                  if (prev === true && next === false) {
+                    setVideoPromptOverrides(cur => {
+                      const overrides = { ...cur }
+                      segments.forEach(seg => {
+                        const imgPrompt = imageResults[seg.id]?.prompt
+                        const actionText = extractActionText(seg, imgPrompt)
+                        if (typeof actionText === 'string' && actionText.trim().length > 0) {
+                          overrides[seg.id] = actionText.trim()
+                        }
+                      })
+                      return overrides
+                    })
+                  }
+                  return next
+                })
+              }}
               aria-expanded={!isStep4Collapsed}
-              title={isStep4Collapsed ? '展开' : '收起'}
+              title={isStep4Collapsed ? '激活' : '收起'}
             >
-              {isStep4Collapsed ? '展开' : '收起'}
+              {isStep4Collapsed ? '激活' : '收起'}
             </button>
           </div>
           <div className={`flex flex-wrap items-center gap-3 text-sm text-gray-600 ${isStep4Collapsed ? 'hidden' : ''}`}>
