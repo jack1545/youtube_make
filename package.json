@@ -8,12 +8,16 @@
     "start": "next start",
     "lint": "eslint",
     "migrate:refs": "node scripts/migrate-reference-images.mjs",
+    "migrate:refs:r2": "node scripts/migrate-reference-images-to-r2.mjs",
     "migrate:refvideos": "node scripts/migrate-reference-videos.mjs",
     "sync:refs": "node scripts/sync-reference-images-to-mongo.mjs",
     "sync:all": "node scripts/sync-supabase-to-mongo.mjs",
-    "clone:mongo": "node scripts/clone-local-to-atlas.mjs"
+    "clone:mongo": "node scripts/clone-local-to-atlas.mjs",
+    "fix:refs:r2pub": "node scripts/fix-r2-public-urls.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.913.0",
+    "@aws-sdk/s3-request-presigner": "^3.913.0",
     "@supabase/supabase-js": "^2.57.4",
     "chokidar": "^4.0.3",
     "dotenv": "^16.4.5",

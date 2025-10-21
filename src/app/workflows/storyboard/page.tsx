@@ -1974,23 +1974,65 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
 
   const handleAddReferenceImage = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!newReferenceUrl.trim()) {
+    const srcUrl = newReferenceUrl.trim()
+    if (!srcUrl) {
       return
     }
 
     setIsAddingReference(true)
     try {
+      // 将输入 URL（http/https 或 data:image）统一压缩为 WebP
+      const { webpBlob, webpDataUrl } = await compressUrlToWebPDataUrl(srcUrl, 0.85)
+
       const effectiveLabel = (selectedFolderLabel && selectedFolderLabel !== '__none__')
         ? selectedFolderLabel
         : (newReferenceLabel.trim() || undefined)
-      const image = await addReferenceImage(newReferenceUrl.trim(), effectiveLabel)
+      // 先以 Data URL 创建记录，获取 id / user_id
+      const image = await addReferenceImage(webpDataUrl, effectiveLabel)
       setReferenceImages(prev => [image, ...prev])
       setSelectedReferenceIds(prev => [image.id, ...prev])
       setAllRefImages(prev => [image, ...(prev || [])])
       setNewReferenceUrl('')
       setNewReferenceLabel('')
       await reloadFolders()
-      setStatus({ type: 'success', text: 'Reference image added.' })
+
+      // 请求 R2 预签名上传地址
+      const res = await fetch('/api/r2/upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: image.id, user_id: image.user_id })
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => null)
+        throw new Error(err?.error || `获取 R2 上传地址失败（HTTP ${res.status}）`)
+      }
+      const { upload_url, public_url, content_type } = await res.json()
+
+      // 上传 WebP Blob 到 R2
+      const putResp = await fetch(upload_url, {
+        method: 'PUT',
+        headers: { 'Content-Type': content_type || 'image/webp' },
+        body: webpBlob
+      })
+      if (!putResp.ok) {
+        throw new Error(`上传到 R2 失败（HTTP ${putResp.status}）`)
+      }
+
+      // 更新参考图记录的 URL
+      const upd = await fetch('/api/reference-images/update-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: image.id, user_id: image.user_id, url: public_url })
+      })
+      if (!upd.ok) {
+        const err = await upd.json().catch(() => null)
+        throw new Error(err?.error || `更新参考图 URL 失败（HTTP ${upd.status}）`)
+      }
+
+      // 更新前端状态为公共 URL
+      setReferenceImages(prev => prev.map(it => it.id === image.id ? { ...it, url: public_url } : it))
+      setAllRefImages(prev => prev.map(it => it.id === image.id ? { ...it, url: public_url } : it))
+      setStatus({ type: 'success', text: '参考图已压缩为 WebP 并上传到 R2。' })
     } catch (error) {
       console.error('Failed to add reference image', error)
       setStatus({ type: 'error', text: 'Failed to add reference image.' })
@@ -2019,6 +2061,50 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     })
   }
 
+  const blobToDataUrl = (blob: Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = reject
+      reader.readAsDataURL(blob)
+    })
+  }
+
+  async function compressBlobToWebP(blob: Blob, quality = 0.85, maxDimension = 2048): Promise<Blob> {
+    const img = await createImageBitmap(blob)
+    const scale = Math.min(1, maxDimension / Math.max(img.width, img.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(img.width * scale))
+    canvas.height = Math.max(1, Math.round(img.height * scale))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Canvas 2D context unavailable')
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+    const webpBlob: Blob = await new Promise((resolve, reject) => {
+      canvas.toBlob(b => (b ? resolve(b) : reject(new Error('WebP 压缩失败'))), 'image/webp', quality)
+    })
+    return webpBlob
+  }
+
+  async function compressFileToWebP(file: File, quality = 0.85, maxDimension = 2048): Promise<Blob> {
+    return compressBlobToWebP(file, quality, maxDimension)
+  }
+
+  async function compressUrlToWebPDataUrl(inputUrl: string, quality = 0.85, maxDimension = 2048): Promise<{ webpBlob: Blob; webpDataUrl: string }> {
+    let blob: Blob
+    if (/^data:image\//i.test(inputUrl)) {
+      const resp = await fetch(inputUrl)
+      blob = await resp.blob()
+    } else {
+      const proxied = `/api/proxy-image?url=${encodeURIComponent(inputUrl)}`
+      const resp = await fetch(proxied)
+      if (!resp.ok) throw new Error(`代理获取图片失败（HTTP ${resp.status}）`)
+      blob = await resp.blob()
+    }
+    const webpBlob = await compressBlobToWebP(blob, quality, maxDimension)
+    const webpDataUrl = await blobToDataUrl(webpBlob)
+    return { webpBlob, webpDataUrl }
+  }
+
   const handleUploadReferenceImage = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const file = newReferenceFile
@@ -2028,39 +2114,59 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
     }
     setIsUploadingReference(true)
     try {
-      let finalUrl: string | null = null
-      let usedDataUrlFallback = false
-      if (!isDemoMode && (supabase as any)?.storage) {
-        try {
-          const ext = (file.name.split('.').pop() || 'png').toLowerCase()
-          const path = `reference-images/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`
-          const { error: uploadError } = await supabase.storage
-            .from('reference-images')
-            .upload(path, file, { upsert: false, contentType: file.type || `image/${ext}` })
-          if (uploadError) {
-            throw uploadError
-          }
-          const { data: publicData } = supabase.storage.from('reference-images').getPublicUrl(path)
-          finalUrl = publicData?.publicUrl || null
-        } catch (err) {
-          console.warn('Supabase Storage upload failed (bucket missing?), falling back to Data URL.', err)
-        }
-      }
-      if (!finalUrl) {
-        finalUrl = await fileToDataUrl(file)
-        usedDataUrlFallback = true
-      }
+      // 压缩为 WebP
+      const webpBlob = await compressFileToWebP(file, 0.85)
+      const webpDataUrl = await blobToDataUrl(webpBlob)
+
       const effectiveLabel = (selectedFolderLabel && selectedFolderLabel !== '__none__')
         ? selectedFolderLabel
         : (newReferenceLabel.trim() || undefined)
-      const image = await addReferenceImage(finalUrl, effectiveLabel)
+      // 先以 Data URL 创建记录，获取 id / user_id
+      const image = await addReferenceImage(webpDataUrl, effectiveLabel)
       setReferenceImages(prev => [image, ...prev])
       setSelectedReferenceIds(prev => [image.id, ...prev])
       setAllRefImages(prev => [image, ...(prev || [])])
       setNewReferenceFile(null)
       setNewReferenceLabel('')
       await reloadFolders()
-      setStatus({ type: 'success', text: usedDataUrlFallback ? '参考图已上传（使用本地 Data URL）。' : '参考图已上传。' })
+
+      // 请求 R2 预签名上传地址
+      const res = await fetch('/api/r2/upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: image.id, user_id: image.user_id })
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => null)
+        throw new Error(err?.error || `获取 R2 上传地址失败（HTTP ${res.status}）`)
+      }
+      const { upload_url, public_url, content_type } = await res.json()
+
+      // 上传 WebP Blob 到 R2
+      const putResp = await fetch(upload_url, {
+        method: 'PUT',
+        headers: { 'Content-Type': content_type || 'image/webp' },
+        body: webpBlob
+      })
+      if (!putResp.ok) {
+        throw new Error(`上传到 R2 失败（HTTP ${putResp.status}）`)
+      }
+
+      // 更新参考图记录的 URL
+      const upd = await fetch('/api/reference-images/update-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: image.id, user_id: image.user_id, url: public_url })
+      })
+      if (!upd.ok) {
+        const err = await upd.json().catch(() => null)
+        throw new Error(err?.error || `更新参考图 URL 失败（HTTP ${upd.status}）`)
+      }
+
+      // 更新前端状态为公共 URL
+      setReferenceImages(prev => prev.map(it => it.id === image.id ? { ...it, url: public_url } : it))
+      setAllRefImages(prev => prev.map(it => it.id === image.id ? { ...it, url: public_url } : it))
+      setStatus({ type: 'success', text: '参考图已压缩为 WebP 并上传到 R2。' })
     } catch (error) {
       console.error('Failed to upload reference image', error)
       setStatus({ type: 'error', text: '上传参考图失败。' })
@@ -5724,18 +5830,50 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                           const file = it.getAsFile()
                           if (file) {
                             event.preventDefault()
-                            const dataUrl = await fileToDataUrl(file)
+                            // 压缩为 WebP
+                            const webpBlob = await compressFileToWebP(file, 0.85)
+                            const webpDataUrl = await blobToDataUrl(webpBlob)
                             const effectiveLabel = (selectedFolderLabel && selectedFolderLabel !== '__none__')
                               ? selectedFolderLabel
                               : (newReferenceLabel.trim() || undefined)
-                            const image = await addReferenceImage(dataUrl, effectiveLabel)
+                            const image = await addReferenceImage(webpDataUrl, effectiveLabel)
                             setReferenceImages(prev => [image, ...prev])
                             setSelectedReferenceIds(prev => [image.id, ...prev])
                             setAllRefImages(prev => [image, ...(prev || [])])
                             setNewReferenceUrl('')
                             setNewReferenceLabel('')
                             await reloadFolders()
-                            setStatus({ type: 'success', text: '已从剪贴板图片添加参考图。' })
+                            // R2 上传
+                            const res = await fetch('/api/r2/upload-url', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ id: image.id, user_id: image.user_id })
+                            })
+                            if (!res.ok) {
+                              const err = await res.json().catch(() => null)
+                              throw new Error(err?.error || `获取 R2 上传地址失败（HTTP ${res.status}）`)
+                            }
+                            const { upload_url, public_url, content_type } = await res.json()
+                            const putResp = await fetch(upload_url, {
+                              method: 'PUT',
+                              headers: { 'Content-Type': content_type || 'image/webp' },
+                              body: webpBlob
+                            })
+                            if (!putResp.ok) {
+                              throw new Error(`上传到 R2 失败（HTTP ${putResp.status}）`)
+                            }
+                            const upd = await fetch('/api/reference-images/update-url', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ id: image.id, user_id: image.user_id, url: public_url })
+                            })
+                            if (!upd.ok) {
+                              const err = await upd.json().catch(() => null)
+                              throw new Error(err?.error || `更新参考图 URL 失败（HTTP ${upd.status}）`)
+                            }
+                            setReferenceImages(prev => prev.map(it => it.id === image.id ? { ...it, url: public_url } : it))
+                            setAllRefImages(prev => prev.map(it => it.id === image.id ? { ...it, url: public_url } : it))
+                            setStatus({ type: 'success', text: '已从剪贴板图片压缩并上传到 R2。' })
                             return
                           }
                         }
@@ -5744,17 +5882,47 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
                       const text = dt.getData('text')?.trim()
                       if (text && (/^https?:\/\/\S+/.test(text) || /^data:image\//i.test(text))) {
                         event.preventDefault()
+                        const { webpBlob, webpDataUrl } = await compressUrlToWebPDataUrl(text, 0.85)
                         const effectiveLabel = (selectedFolderLabel && selectedFolderLabel !== '__none__')
                           ? selectedFolderLabel
                           : (newReferenceLabel.trim() || undefined)
-                        const image = await addReferenceImage(text, effectiveLabel)
+                        const image = await addReferenceImage(webpDataUrl, effectiveLabel)
                         setReferenceImages(prev => [image, ...prev])
                         setSelectedReferenceIds(prev => [image.id, ...prev])
                         setAllRefImages(prev => [image, ...(prev || [])])
                         setNewReferenceUrl('')
                         setNewReferenceLabel('')
                         await reloadFolders()
-                        setStatus({ type: 'success', text: '已从剪贴板文本添加参考图。' })
+                        const res = await fetch('/api/r2/upload-url', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ id: image.id, user_id: image.user_id })
+                        })
+                        if (!res.ok) {
+                          const err = await res.json().catch(() => null)
+                          throw new Error(err?.error || `获取 R2 上传地址失败（HTTP ${res.status}）`)
+                        }
+                        const { upload_url, public_url, content_type } = await res.json()
+                        const putResp = await fetch(upload_url, {
+                          method: 'PUT',
+                          headers: { 'Content-Type': content_type || 'image/webp' },
+                          body: webpBlob
+                        })
+                        if (!putResp.ok) {
+                          throw new Error(`上传到 R2 失败（HTTP ${putResp.status}）`)
+                        }
+                        const upd = await fetch('/api/reference-images/update-url', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ id: image.id, user_id: image.user_id, url: public_url })
+                        })
+                        if (!upd.ok) {
+                          const err = await upd.json().catch(() => null)
+                          throw new Error(err?.error || `更新参考图 URL 失败（HTTP ${upd.status}）`)
+                        }
+                        setReferenceImages(prev => prev.map(it => it.id === image.id ? { ...it, url: public_url } : it))
+                        setAllRefImages(prev => prev.map(it => it.id === image.id ? { ...it, url: public_url } : it))
+                        setStatus({ type: 'success', text: '已从剪贴板文本压缩并上传到 R2。' })
                         return
                       }
                     } catch (err: any) {
