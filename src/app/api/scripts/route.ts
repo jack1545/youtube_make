@@ -276,3 +276,6 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ error: error?.message || 'Internal error' }, { status: 500 })
   }
 }
+
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'

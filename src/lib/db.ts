@@ -62,18 +62,7 @@ let demoReferenceFolders: ReferenceFolder[] = []
 export async function createProject(name: string, description: string): Promise<Project> {
   const user = getCurrentUser()
 
-  if (isDemoMode) {
-    const project: Project = {
-      id: `demo_${Date.now()}`,
-      name,
-      description,
-      user_id: user.id,
-      created_at: new Date().toISOString()
-    }
-    demoProjects.unshift(project)
-    return project
-  }
-
+  // 始终优先通过 API 创建，失败时回退到本地 demo
   try {
     const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
     const res = await fetch(`${baseOrigin}/api/projects`, {
@@ -83,14 +72,22 @@ export async function createProject(name: string, description: string): Promise<
     })
     if (!res.ok) {
       const err = await res.json().catch(() => null)
-      console.error('API:create project failed', err)
-      throw new Error(`Create project failed: ${res.status}`)
+      console.warn('API:create project failed, fallback to local demo', err)
+      const project: Project = {
+        id: `local_${Date.now()}`,
+        name,
+        description,
+        user_id: user.id,
+        created_at: new Date().toISOString()
+      }
+      demoProjects.unshift(project)
+      return project
     }
     const data = await res.json()
     const item = data.item as Project
     return item
   } catch (error) {
-    console.error('Failed to create project via API', error)
+    console.error('Failed to create project via API, falling back to local demo', error)
     // 兼容回退：若 API 不可用，避免阻断流程，创建一个本地占位项目
     const project: Project = {
       id: `local_${Date.now()}`,
@@ -107,30 +104,47 @@ export async function createProject(name: string, description: string): Promise<
 export async function getProjects(): Promise<Project[]> {
   const user = getCurrentUser()
 
-  if (isDemoMode) {
-    return demoProjects.filter(p => p.user_id === user.id)
-  }
-
+  // 改为“优先 API，失败回退到本地 demo”以避免 Supabase 环境导致 MongoDB 读取被阻断
   try {
     const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
     const res = await fetch(`${baseOrigin}/api/projects`)
     if (!res.ok) {
       const err = await res.json().catch(() => null)
-      console.error('API:get projects failed', err)
-      return []
+      console.warn('API:get projects failed, fallback to local demo', err)
+      return demoProjects.filter(p => p.user_id === user.id)
     }
     const data = await res.json()
     return (data.items as Project[]) || []
   } catch (error) {
-    console.error('Failed to load projects via API', error)
-    return []
+    console.error('Failed to load projects via API, falling back to local demo', error)
+    return demoProjects.filter(p => p.user_id === user.id)
   }
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
   const user = getCurrentUser()
 
-  if (isDemoMode) {
+  // 优先调用 API 删除；失败时回退到本地 demo 删除
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/projects`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: projectId })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.warn('API:delete project failed, fallback to local demo', err)
+      // fallthrough to local removal below
+      throw new Error('fallback_to_local')
+    }
+    await res.json().catch(() => null)
+    return
+  } catch (error) {
+    // 本地删除流程
+    if ((error as any)?.message !== 'fallback_to_local') {
+      console.error('Failed to delete project via API, falling back to local demo', error)
+    }
     // Remove project (mutate const arrays via splice)
     for (let i = demoProjects.length - 1; i >= 0; i--) {
       if (demoProjects[i].id === projectId && demoProjects[i].user_id === user.id) {
@@ -160,41 +174,11 @@ export async function deleteProject(projectId: string): Promise<void> {
     }
     return
   }
-
-  try {
-    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
-    const res = await fetch(`${baseOrigin}/api/projects`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: projectId })
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => null)
-      throw new Error(err?.error || `Failed to delete project (HTTP ${res.status})`)
-    }
-    // Optionally, we could use returned deleted counts
-    await res.json().catch(() => null)
-  } catch (error) {
-    console.error('Failed to delete project via API', error)
-    throw error
-  }
 }
 
 // 脚本相关操作
 export async function createScript(projectId: string, content: ScriptSegment[], rawText?: string): Promise<Script> {
-  if (isDemoMode) {
-    const script: Script = {
-      id: `demo_script_${Date.now()}`,
-      project_id: projectId,
-      content,
-      status: 'draft',
-      created_at: new Date().toISOString(),
-      raw_text: rawText
-    }
-    demoScripts.unshift(script)
-    return script
-  }
-
+  // 始终优先通过 API 创建脚本；失败时回退到本地 demo
   try {
     const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
     const res = await fetch(`${baseOrigin}/api/scripts`, {
@@ -204,21 +188,37 @@ export async function createScript(projectId: string, content: ScriptSegment[], 
     })
     if (!res.ok) {
       const err = await res.json().catch(() => null)
-      throw new Error(err?.error || `Failed to create script (HTTP ${res.status})`)
+      console.warn('API:create script failed, fallback to local demo', err)
+      const script: Script = {
+        id: `local_script_${Date.now()}`,
+        project_id: projectId,
+        content,
+        status: 'draft',
+        created_at: new Date().toISOString(),
+        raw_text: rawText
+      }
+      demoScripts.unshift(script)
+      return script
     }
     const data = await res.json()
     return data.item as Script
   } catch (error) {
-    console.error('Failed to create script via API', error)
-    throw error
+    console.error('Failed to create script via API, falling back to local demo', error)
+    const script: Script = {
+      id: `local_script_${Date.now()}`,
+      project_id: projectId,
+      content,
+      status: 'draft',
+      created_at: new Date().toISOString(),
+      raw_text: rawText
+    }
+    demoScripts.unshift(script)
+    return script
   }
 }
 
 export async function getScripts(projectId: string): Promise<Script[]> {
-  if (isDemoMode) {
-    return demoScripts.filter(s => s.project_id === projectId)
-  }
-
+  // 始终优先读取 API；失败时回退到本地 demo 脚本
   try {
     const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
     const params = new URLSearchParams({ project_id: projectId })
@@ -237,28 +237,19 @@ export async function getScripts(projectId: string): Promise<Script[]> {
       } catch {
         errMsg = `HTTP ${res.status}`
       }
-      console.warn(`API:get scripts failed (status ${res.status})`, errMsg)
-      return []
+      console.warn(`API:get scripts failed (status ${res.status}), fallback to local demo`, errMsg)
+      return demoScripts.filter(s => s.project_id === projectId)
     }
     const data = await res.json()
     return (data.items as Script[]) || []
   } catch (error) {
-    console.error('Failed to load scripts via API', error)
-    return []
+    console.error('Failed to load scripts via API, falling back to local demo', error)
+    return demoScripts.filter(s => s.project_id === projectId)
   }
 }
 
 export async function updateScript(id: string, content: ScriptSegment[], rawText?: string): Promise<Script> {
-  if (isDemoMode) {
-    const index = demoScripts.findIndex(s => s.id === id)
-    if (index !== -1) {
-      demoScripts[index].content = content
-      demoScripts[index].raw_text = rawText
-      return demoScripts[index]
-    }
-    throw new Error('Script not found')
-  }
-
+  // 优先调用 API 更新；失败时回退到本地 demo 更新
   try {
     const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
     const res = await fetch(`${baseOrigin}/api/scripts`, {
@@ -268,20 +259,61 @@ export async function updateScript(id: string, content: ScriptSegment[], rawText
     })
     if (!res.ok) {
       const err = await res.json().catch(() => null)
-      throw new Error(err?.error || `Failed to update script (HTTP ${res.status})`)
+      console.warn('API:update script failed, fallback to local demo', err)
+      // fallthrough to local update below
+      throw new Error('fallback_to_local')
     }
     const data = await res.json()
     return data.item as Script
   } catch (error) {
-    console.error('Failed to update script via API', error)
-    throw error
+    // 本地更新
+    if ((error as any)?.message !== 'fallback_to_local') {
+      console.error('Failed to update script via API, falling back to local demo', error)
+    }
+    const index = demoScripts.findIndex(s => s.id === id)
+    if (index !== -1) {
+      demoScripts[index].content = content
+      demoScripts[index].raw_text = rawText
+      return demoScripts[index]
+    }
+    // 若本地未找到该脚本（例如此前在 API 成功创建），为了不中断用户流程，创建一个占位脚本并返回
+    const placeholder: Script = {
+      id,
+      project_id: 'local_unknown_project',
+      content,
+      status: 'draft',
+      created_at: new Date().toISOString(),
+      raw_text: rawText
+    }
+    demoScripts.unshift(placeholder)
+    return placeholder
   }
 }
 
 export async function deleteScript(id: string): Promise<void> {
   const user = getCurrentUser()
 
-  if (isDemoMode) {
+  // 优先调用 API 删除；失败时回退到本地 demo 删除
+  try {
+    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
+    const res = await fetch(`${baseOrigin}/api/scripts`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => null)
+      console.warn('API:delete script failed, fallback to local demo', err)
+      // fallthrough to local removal below
+      throw new Error('fallback_to_local')
+    }
+    await res.json().catch(() => null)
+    return
+  } catch (error) {
+    // 本地删除流程
+    if ((error as any)?.message !== 'fallback_to_local') {
+      console.error('Failed to delete script via API, falling back to local demo', error)
+    }
     // Remove script in demo storage if belongs to current user's project
     for (let i = demoScripts.length - 1; i >= 0; i--) {
       if (demoScripts[i].id === id) {
@@ -300,23 +332,6 @@ export async function deleteScript(id: string): Promise<void> {
       }
     }
     return
-  }
-
-  try {
-    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : ''
-    const res = await fetch(`${baseOrigin}/api/scripts`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id })
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => null)
-      throw new Error(err?.error || `Failed to delete script (HTTP ${res.status})`)
-    }
-    await res.json().catch(() => null)
-  } catch (error) {
-    console.error('Failed to delete script via API', error)
-    throw error
   }
 }
 
@@ -483,17 +498,6 @@ export async function addReferenceImage(url: string, label?: string): Promise<Re
 export async function getReferenceImages(limit = 10, before?: string): Promise<ReferenceImage[]> {
   const user = getCurrentUser()
 
-  if (isDemoMode) {
-    const mine = demoReferenceImages.filter(img => img.user_id === user.id)
-    const sortedMine = [...mine].sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    )
-    if (before) {
-      return sortedMine.filter(img => new Date(img.created_at).getTime() < new Date(before).getTime()).slice(0, limit)
-    }
-    return sortedMine.slice(0, limit)
-  }
-
   try {
     const key = makeRefKey(user.id, before, limit)
     const cached = readRefCache(key)
@@ -505,38 +509,33 @@ export async function getReferenceImages(limit = 10, before?: string): Promise<R
     const res = await fetch(`${baseOrigin}/api/reference-images?${params.toString()}`)
     if (!res.ok) {
       const err = await res.json().catch(() => null)
-      console.error('API:get reference_images failed', err)
-      return []
+      console.warn('API:get reference_images failed, falling back to demo', err)
+      throw new Error('api_failed')
     }
     const data = await res.json()
     const items = (data.items as ReferenceImage[]) || []
     writeRefCache(key, items)
     return items
   } catch (error) {
-    console.error('Failed to load reference images via API', error)
-    return []
+    const mine = demoReferenceImages.filter(img => img.user_id === user.id)
+    const sortedMine = [...mine].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    )
+    const filtered = before
+      ? sortedMine.filter(img => new Date(img.created_at).getTime() < new Date(before).getTime())
+      : sortedMine
+    const items = filtered.slice(0, limit)
+    try {
+      const key = makeRefKey(user.id, before, limit)
+      writeRefCache(key, items)
+    } catch {}
+    return items
   }
 }
 
 // 按目录（label）读取参考图；labelKey 为 '__none__' 表示未归类
 export async function getReferenceImagesByLabel(labelKey: string | null, limit = 10, before?: string): Promise<ReferenceImage[]> {
   const user = getCurrentUser()
-
-  if (isDemoMode) {
-    const mine = demoReferenceImages.filter(img => img.user_id === user.id)
-    const filtered = mine.filter(img => {
-      const labels = Array.isArray((img as any).labels) ? (img as any).labels : []
-      if (labelKey === '__none__' || labelKey === null) {
-        return (!img.label && labels.length === 0)
-      }
-      return img.label === labelKey || labels.includes(String(labelKey))
-    })
-    const sorted = [...filtered].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    if (before) {
-      return sorted.filter(img => new Date(img.created_at).getTime() < new Date(before).getTime()).slice(0, limit)
-    }
-    return sorted.slice(0, limit)
-  }
 
   try {
     const params = new URLSearchParams({ user_id: user.id, limit: String(limit) })
@@ -547,15 +546,26 @@ export async function getReferenceImagesByLabel(labelKey: string | null, limit =
     const res = await fetch(`${baseOrigin}/api/reference-images?${params.toString()}`)
     if (!res.ok) {
       const err = await res.json().catch(() => null)
-      console.error('API:get reference_images by label failed', err)
-      return []
+      console.warn('API:get reference_images by label failed, falling back to demo', err)
+      throw new Error('api_failed')
     }
     const data = await res.json()
     const items = (data.items as ReferenceImage[]) || []
     return items
   } catch (error) {
-    console.error('Failed to load reference images by label via API', error)
-    return []
+    const mine = demoReferenceImages.filter(img => img.user_id === user.id)
+    const filtered = mine.filter(img => {
+      const labels = Array.isArray((img as any).labels) ? (img as any).labels : []
+      if (labelKey === '__none__' || labelKey === null) {
+        return (!img.label && labels.length === 0)
+      }
+      return img.label === labelKey || labels.includes(String(labelKey))
+    })
+    const sorted = [...filtered].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    const items = before
+      ? sorted.filter(img => new Date(img.created_at).getTime() < new Date(before).getTime()).slice(0, limit)
+      : sorted.slice(0, limit)
+    return items
   }
 }
 
@@ -1019,7 +1029,6 @@ export async function getReferenceFolders(limit = 10, before?: string): Promise<
     }))
     const explicit = demoReferenceFolders.filter(f => f.user_id === user.id)
     const byName = new Map<string, ReferenceFolder>()
-    // 计算显式目录的图片数量，并过滤空目录（等同自动删除不展示）
     const explicitWithCounts = explicit
       .map(f => ({
         ...f,

@@ -24,3 +24,16 @@
 [2025-10-21T02:10:54.042Z] reference_videos: total=52 copied=0 errors=0
 [2025-10-21T02:10:54.351Z] generated_videos: total=11 copied=0 errors=0
 [2025-10-21T02:10:54.731Z] local_assets: total=1057 copied=0 errors=0
+[2025-10-21T04:52:37.723Z] script_analyses: total=2 copied=2 errors=0
+[2025-10-21T04:52:38.002Z] reference_folders: total=11 copied=11 errors=0
+[2025-10-21T04:52:38.560Z] video_prompts: total=31 copied=31 errors=0
+[2025-10-21T04:52:40.486Z] scripts: total=47 copied=47 errors=0
+[2025-10-21T04:52:43.404Z] generated_images: total=140 copied=140 errors=0
+[2025-10-21T04:52:44.473Z] api_key_settings: total=1 copied=1 errors=0
+[2025-10-21T04:52:44.747Z] local_projects: total=30 copied=30 errors=0
+[2025-10-21T04:52:45.820Z] projects: total=28 copied=28 errors=0
+[2025-10-21T04:53:49.862Z] reference_images: total=117 copied=117 errors=0
+[2025-10-21T04:53:50.153Z] worldview_settings: total=4 copied=4 errors=0
+[2025-10-21T04:53:50.963Z] reference_videos: total=52 copied=52 errors=0
+[2025-10-21T04:53:51.802Z] generated_videos: total=11 copied=11 errors=0
+[2025-10-21T04:53:52.896Z] local_assets: total=1057 copied=1057 errors=0
