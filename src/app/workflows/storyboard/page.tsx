@@ -2213,13 +2213,11 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
             mood: String(s.prompt?.time_of_day ?? ''),
             prompt_detail: s.prompt
               ? {
-                  subject: s.prompt.subject
-                    ? {
-                        characters_present: String(s.prompt.subject.characters_present ?? ''),
-                        expression: String(s.prompt.subject.expression ?? ''),
-                        action: String(s.prompt.subject.action ?? '')
-                      }
-                    : undefined,
+                  subject: {
+                    characters_present: String(s.prompt.subject?.characters_present ?? ''),
+                    expression: String(s.prompt.subject?.expression ?? ''),
+                    action: String(s.prompt.subject?.action ?? '')
+                  },
                   environment: String(s.prompt.environment ?? ''),
                   time_of_day: String(s.prompt.time_of_day ?? ''),
                   weather: String(s.prompt.weather ?? ''),
@@ -2239,13 +2237,11 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         mood: String(segment.prompt?.time_of_day ?? ''),
         prompt_detail: segment.prompt
           ? {
-              subject: segment.prompt.subject
-                ? {
-                    characters_present: String(segment.prompt.subject.characters_present ?? ''),
-                    expression: String(segment.prompt.subject.expression ?? ''),
-                    action: String(segment.prompt.subject.action ?? '')
-                  }
-                : undefined,
+              subject: {
+                characters_present: String(segment.prompt.subject?.characters_present ?? ''),
+                expression: String(segment.prompt.subject?.expression ?? ''),
+                action: String(segment.prompt.subject?.action ?? '')
+              },
               environment: String(segment.prompt.environment ?? ''),
               time_of_day: String(segment.prompt.time_of_day ?? ''),
               weather: String(segment.prompt.weather ?? ''),
@@ -2303,13 +2299,11 @@ const handleUpdateHistoryShot = useCallback(async (img: GeneratedImage) => {
         mood: String(seg.prompt?.time_of_day ?? ''),
         prompt_detail: seg.prompt
           ? {
-              subject: seg.prompt.subject
-                ? {
-                    characters_present: String(seg.prompt.subject.characters_present ?? ''),
-                    expression: String(seg.prompt.subject.expression ?? ''),
-                    action: String(seg.prompt.subject.action ?? '')
-                  }
-                : undefined,
+              subject: {
+                characters_present: String(seg.prompt.subject?.characters_present ?? ''),
+                expression: String(seg.prompt.subject?.expression ?? ''),
+                action: String(seg.prompt.subject?.action ?? '')
+              },
               environment: String(seg.prompt.environment ?? ''),
               time_of_day: String(seg.prompt.time_of_day ?? ''),
               weather: String(seg.prompt.weather ?? ''),
