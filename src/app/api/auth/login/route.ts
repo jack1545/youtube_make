@@ -10,7 +10,7 @@ export async function POST(req: Request) {
     const password = (body.password || '').trim()
 
     const expectedUser = process.env.ADMIN_USERNAME || 'admin'
-    const expectedPass = process.env.ADMIN_PASSWORD || 'admin123'
+    const expectedPass = process.env.ADMIN_PASSWORD || 'Baisha2003.'
 
     if (!username || !password) {
       return NextResponse.json({ ok: false, error: '缺少用户名或密码' }, { status: 400 })

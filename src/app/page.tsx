@@ -874,7 +874,7 @@ export default function Home() {
                   value={loginUsername}
                   onChange={e => setLoginUsername(e.target.value)}
                   className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                  placeholder="admin"
+                  placeholder=""
                 />
               </div>
               <div>
@@ -884,7 +884,7 @@ export default function Home() {
                   value={loginPassword}
                   onChange={e => setLoginPassword(e.target.value)}
                   className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                  placeholder="admin123"
+                  placeholder=""
                 />
               </div>
             </div>
