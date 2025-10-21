@@ -10,7 +10,8 @@
     "migrate:refs": "node scripts/migrate-reference-images.mjs",
     "migrate:refvideos": "node scripts/migrate-reference-videos.mjs",
     "sync:refs": "node scripts/sync-reference-images-to-mongo.mjs",
-    "sync:all": "node scripts/sync-supabase-to-mongo.mjs"
+    "sync:all": "node scripts/sync-supabase-to-mongo.mjs",
+    "clone:mongo": "node scripts/clone-local-to-atlas.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
