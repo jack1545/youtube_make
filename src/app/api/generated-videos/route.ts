@@ -8,7 +8,7 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function GET(req: Request) {
-  const ck = cookies().get('cw_session')?.value || ''
+  const ck = (await cookies()).get('cw_session')?.value || ''
   if (!/role=admin/.test(ck)) {
     return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
   }
@@ -53,7 +53,7 @@ export async function GET(req: Request) {
 // POST /api/generated-videos
 // body: { image_url: string, prompt: string, script_id?: string | null, shot_number?: number, status?: string, video_url?: string }
 export async function POST(req: Request) {
-  const ck = cookies().get('cw_session')?.value || ''
+  const ck = (await cookies()).get('cw_session')?.value || ''
   if (!/role=admin/.test(ck)) {
     return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
   }
@@ -106,7 +106,7 @@ export async function POST(req: Request) {
 // PATCH /api/generated-videos
 // body: { id: string, status?: string, video_url?: string }
 export async function PATCH(req: Request) {
-  const ck = cookies().get('cw_session')?.value || ''
+  const ck = (await cookies()).get('cw_session')?.value || ''
   if (!/role=admin/.test(ck)) {
     return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
   }

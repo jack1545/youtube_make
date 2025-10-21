@@ -4,7 +4,7 @@ import { getDb } from '@/lib/mongodb'
 import { randomUUID } from 'crypto'
 
 export async function GET(req: Request) {
-  const ck = cookies().get('cw_session')?.value || ''
+  const ck = (await cookies()).get('cw_session')?.value || ''
   if (!/role=admin/.test(ck)) {
     return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
   }
@@ -92,7 +92,7 @@ export async function GET(req: Request) {
 // POST /api/scripts
 // body: { project_id: string, content: any[], status?: 'draft'|'editing'|'completed', raw_text?: string }
 export async function POST(req: Request) {
-  const ck = cookies().get('cw_session')?.value || ''
+  const ck = (await cookies()).get('cw_session')?.value || ''
   if (!/role=admin/.test(ck)) {
     return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
   }
@@ -154,7 +154,7 @@ export async function POST(req: Request) {
 // PATCH /api/scripts
 // body: { id: string, content?: any[], status?: 'draft'|'editing'|'completed', raw_text?: string }
 export async function PATCH(req: Request) {
-  const ck = cookies().get('cw_session')?.value || ''
+  const ck = (await cookies()).get('cw_session')?.value || ''
   if (!/role=admin/.test(ck)) {
     return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
   }
@@ -230,7 +230,7 @@ export async function PATCH(req: Request) {
 // DELETE /api/scripts
 // body: { id: string }
 export async function DELETE(req: Request) {
-  const ck = cookies().get('cw_session')?.value || ''
+  const ck = (await cookies()).get('cw_session')?.value || ''
   if (!/role=admin/.test(ck)) {
     return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
   }
