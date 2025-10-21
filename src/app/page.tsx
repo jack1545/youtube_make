@@ -129,6 +129,13 @@ export default function Home() {
   const [isQueueingVideo, setIsQueueingVideo] = useState(false)
   const [expandedScriptIds, setExpandedScriptIds] = useState<string[]>([])
 
+  // 管理员/访客登录状态
+  const [authRole, setAuthRole] = useState<'admin' | 'guest'>('guest')
+  const [loginOpen, setLoginOpen] = useState(false)
+  const [loginUsername, setLoginUsername] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [authInfo, setAuthInfo] = useState('')
+
   useEffect(() => {
     const init = async () => {
       try {
@@ -146,6 +153,26 @@ export default function Home() {
     }
 
     void init()
+  }, [])
+
+  // 会话角色检测：localStorage 优先，其次 cookie
+  useEffect(() => {
+    try {
+      const local = localStorage.getItem('auth_role')
+      if (local === 'admin') {
+        setAuthRole('admin')
+        return
+      }
+    } catch {}
+    try {
+      const ck = document.cookie || ''
+      const m = ck.match(/(?:^|;\s*)cw_session=([^;]+)/)
+      if (m && /role=admin/.test(decodeURIComponent(m[1] || ''))) {
+        setAuthRole('admin')
+        return
+      }
+    } catch {}
+    setAuthRole('guest')
   }, [])
 
   useEffect(() => {
@@ -206,7 +233,9 @@ export default function Home() {
       if (apiKeyStorageMode === 'cache') {
         try {
           const raw = localStorage.getItem('api_key_settings')
-          if (raw) {
+          const exp = localStorage.getItem('api_key_cache_expires_at')
+          const isExpired = exp ? Date.now() > new Date(exp).getTime() : false
+          if (raw && !isExpired) {
             const settings = JSON.parse(raw)
             setApiKeyForm({
               gemini_api_key: settings.gemini_api_key || '',
@@ -215,6 +244,12 @@ export default function Home() {
             })
             setApiKeyUpdatedAt(localStorage.getItem('api_key_updated_at'))
           } else {
+            // 过期或不存在：清理缓存并重置
+            try {
+              localStorage.removeItem('api_key_settings')
+              localStorage.removeItem('api_key_updated_at')
+              localStorage.removeItem('api_key_cache_expires_at')
+            } catch {}
             setApiKeyForm({ gemini_api_key: '', doubao_api_key: '', veo3_api_key: '' })
             setApiKeyUpdatedAt(null)
           }
@@ -647,12 +682,15 @@ export default function Home() {
     setIsSavingKeys(true)
     try {
       if (apiKeyStorageMode === 'cache') {
-        // 保存到浏览器缓存（仅当前设备/浏览器可用）
+        // 保存到浏览器缓存（仅当前设备/浏览器可用），并设置 7 天过期
         localStorage.setItem('api_key_settings', JSON.stringify(apiKeyForm))
-        const now = new Date().toISOString()
-        localStorage.setItem('api_key_updated_at', now)
-        setApiKeyUpdatedAt(now)
-        setStatus({ type: 'success', message: 'API Key 已保存到缓存（本地）。' })
+        const nowMs = Date.now()
+        const nowIso = new Date(nowMs).toISOString()
+        const expiresIso = new Date(nowMs + 7 * 24 * 60 * 60 * 1000).toISOString()
+        localStorage.setItem('api_key_updated_at', nowIso)
+        localStorage.setItem('api_key_cache_expires_at', expiresIso)
+        setApiKeyUpdatedAt(nowIso)
+        setStatus({ type: 'success', message: 'API Key 已保存到缓存（本地，7 天有效）。' })
       } else {
         const saved = await saveApiKeySettings(apiKeyForm)
         setApiKeyUpdatedAt(saved.updated_at)
@@ -738,6 +776,40 @@ export default function Home() {
       setIsQueueingVideo(false)
     }
   }
+
+  async function handleLogin() {
+    setAuthInfo('')
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: loginUsername, password: loginPassword })
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error((data as any)?.error || '登录失败')
+      setAuthRole('admin')
+      try { localStorage.setItem('auth_role', 'admin') } catch {}
+      setLoginOpen(false)
+      setStatus({ type: 'success', message: '已进入管理员模式。' })
+    } catch (e: any) {
+      setAuthInfo(e?.message || '登录失败')
+      setStatus({ type: 'error', message: e?.message || '登录失败。' })
+    }
+  }
+
+  async function handleLogout() {
+    setAuthInfo('')
+    try {
+      const res = await fetch('/api/auth/logout', { method: 'POST' })
+      if (!res.ok) throw new Error('退出失败')
+      setAuthRole('guest')
+      try { localStorage.setItem('auth_role', 'guest') } catch {}
+      setStatus({ type: 'success', message: '已退出管理员模式。' })
+    } catch (e: any) {
+      setStatus({ type: 'error', message: e?.message || '退出失败。' })
+    }
+  }
+
   if (isLoading) {
     return (
       <div className="space-y-4">
@@ -763,6 +835,80 @@ export default function Home() {
           {status.message}
         </div>
       )}
+
+      {/* 会话模式与登录弹窗 */}
+      <section className="rounded-lg border border-purple-200 bg-purple-50 p-4 shadow-sm">
+        <div className="flex items-center justify-between">
+          <div className="text-sm">
+            <span className="font-medium">会话模式：</span>
+            <span className={authRole === 'admin' ? 'text-green-700' : 'text-gray-700'}>
+              {authRole === 'admin' ? '管理员模式（MongoDB已启用）' : '访客模式（仅本地缓存）'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {authRole === 'admin' ? (
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm text-gray-700 hover:bg-white"
+              >
+                退出登录
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setLoginOpen(true)}
+                className="rounded-md bg-purple-600 px-3 py-1 text-sm text-white hover:bg-purple-700"
+              >
+                管理员登录
+              </button>
+            )}
+          </div>
+        </div>
+        {loginOpen && (
+          <div className="mt-3 rounded-md border border-gray-200 bg-white p-3">
+            <div className="grid gap-2 md:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-700">用户名</label>
+                <input
+                  value={loginUsername}
+                  onChange={e => setLoginUsername(e.target.value)}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  placeholder="admin"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-700">密码</label>
+                <input
+                  type="password"
+                  value={loginPassword}
+                  onChange={e => setLoginPassword(e.target.value)}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  placeholder="admin123"
+                />
+              </div>
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleLogin}
+                className="rounded-md bg-purple-600 px-3 py-1.5 text-sm text-white hover:bg-purple-700"
+              >
+                登录
+              </button>
+              <button
+                type="button"
+                onClick={() => { setLoginOpen(false); setAuthInfo('') }}
+                className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-white"
+              >
+                取消
+              </button>
+              {authInfo && <span className="text-xs text-red-600">{authInfo}</span>}
+            </div>
+            <p className="mt-2 text-xs text-gray-500">默认凭据可在 `.env.local` 设置 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`。</p>
+          </div>
+        )}
+      </section>
 
       <section className="rounded-lg border border-blue-200 bg-blue-50 p-6 shadow-sm">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">

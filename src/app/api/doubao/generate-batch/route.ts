@@ -11,6 +11,8 @@ interface DoubaoBatchPayload {
   }
   // 新增：当提供脚本ID时，服务端将生成结果持久化到 MongoDB
   script_id?: string
+  // 新增：允许访客模式传入 Doubao API Key 覆盖
+  doubao_api_key_override?: string
 }
 
 async function resolveDoubaoApiKey(): Promise<string | null> {
@@ -59,16 +61,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Invalid request payload' }, { status: 400 })
     }
 
+    // 优先使用访客提供的覆盖密钥（仅当格式看起来有效时）
+    const override = (payload.doubao_api_key_override || '').trim()
+    let apiKey: string | null = null
+    if (override && override.length >= 20 && override !== 'your_doubao_api_key') {
+      apiKey = override
+      process.env.DOUBAO_API_KEY = apiKey
+    }
+
     // Ensure the Doubao API key is available on the server. If we fetch a key from
     // Supabase, temporarily assign it to process.env so the shared helper can use it.
-    let apiKey = process.env.DOUBAO_API_KEY
-    if (!apiKey || apiKey === 'your_doubao_api_key' || apiKey.length < 20) {
-      const resolvedKey = await resolveDoubaoApiKey()
-      if (!resolvedKey) {
-        return NextResponse.json({ error: 'Doubao API key not configured' }, { status: 401 })
+    if (!apiKey) {
+      let envKey = process.env.DOUBAO_API_KEY
+      if (!envKey || envKey === 'your_doubao_api_key' || envKey.length < 20) {
+        const resolvedKey = await resolveDoubaoApiKey()
+        if (!resolvedKey) {
+          return NextResponse.json({ error: 'Doubao API key not configured' }, { status: 401 })
+        }
+        process.env.DOUBAO_API_KEY = resolvedKey
+        envKey = resolvedKey
       }
-      process.env.DOUBAO_API_KEY = resolvedKey
-      apiKey = resolvedKey
+      apiKey = envKey
     }
 
     const defaultSize = payload.options?.size
@@ -86,47 +99,42 @@ export async function POST(req: Request) {
     // 并发优化：按批次并发生成，减少整体等待时间
     const results: any[] = new Array(payload.requests.length)
     const concurrency = Math.max(1, Math.min(8, Number(process.env.DOUBAO_CONCURRENCY || 4)))
+
     for (let start = 0; start < payload.requests.length; start += concurrency) {
       const slice = payload.requests.slice(start, start + concurrency)
-      const tasks = slice.map((request, offset) => (async () => {
-        const index = start + offset
-        if (!request?.prompt) {
-          return {
-            url: 'https://via.placeholder.com/1024x1024?text=Invalid+Prompt',
-            prompt: 'Invalid prompt payload',
-            referenceImageUrl: request?.referenceImageUrl
-          }
-        }
+      const tasks = slice.map(async (req) => {
+        try {
+          const image = await generateImage({
+            prompt: req.prompt,
+            referenceImageUrl: req.referenceImageUrl,
+            referenceImageUrls: req.referenceImageUrls,
+            size: req.size || defaultSize,
+            responseFormat: defaultFormat || 'url'
+          })
 
-        const image = await generateImage({
-          prompt: request.prompt,
-          referenceImageUrl: request.referenceImageUrl,
-          referenceImageUrls: request.referenceImageUrls,
-          size: request.size || defaultSize,
-          responseFormat: defaultFormat
-        })
-
-        // 持久化到 MongoDB（可选）
-        if (imagesColl && scriptId) {
-          try {
-            const uniqueId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-              ? crypto.randomUUID()
-              : `${scriptId}-${Date.now()}-${index}`
+          // 可选：持久化到 MongoDB
+          if (imagesColl && scriptId) {
             await imagesColl.insertOne({
-              id: uniqueId,
+              id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               script_id: scriptId,
-              prompt: image.prompt || request.prompt,
+              prompt: image.prompt,
               image_url: image.url,
-              shot_number: request.shot_number,
               status: 'completed',
+              shot_number: typeof req.shot_number === 'number' ? req.shot_number : undefined,
               created_at: nowIso
             })
-          } catch (persistErr) {
-            console.error('Failed to persist generated image', persistErr)
+          }
+
+          return image
+        } catch (err) {
+          console.error('generateImage error', err)
+          return {
+            url: 'https://via.placeholder.com/1024x1024?text=Generation+Error',
+            prompt: req?.prompt || 'Generation error',
+            referenceImageUrl: req?.referenceImageUrl
           }
         }
-        return image
-      })())
+      })
 
       const settled = await Promise.allSettled(tasks)
       settled.forEach((res, offset) => {

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { cookies } from 'next/headers'
 import { getDb } from '@/lib/mongodb'
 
 export const runtime = 'nodejs'
@@ -6,6 +7,10 @@ export const dynamic = 'force-dynamic'
 
 // GET /api/reference-videos?user_id=...&limit=10&before=ISO8601&script_id=...&project_id=...
 export async function GET(req: Request) {
+  const ck = cookies().get('cw_session')?.value || ''
+  if (!/role=admin/.test(ck)) {
+    return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
+  }
   try {
     const url = new URL(req.url)
     const userId = url.searchParams.get('user_id')
@@ -84,6 +89,10 @@ export async function GET(req: Request) {
 // POST /api/reference-videos
 // body: { url: string, label?: string, user_id: string, script_id?: string, project_id?: string }
 export async function POST(req: Request) {
+  const ck = cookies().get('cw_session')?.value || ''
+  if (!/role=admin/.test(ck)) {
+    return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
+  }
   try {
     const payload = await req.json().catch(() => null)
     if (!payload || typeof payload !== 'object') {
@@ -120,6 +129,10 @@ export async function POST(req: Request) {
 // PATCH /api/reference-videos
 // body: { id: string, label: string, user_id: string }
 export async function PATCH(req: Request) {
+  const ck = cookies().get('cw_session')?.value || ''
+  if (!/role=admin/.test(ck)) {
+    return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
+  }
   try {
     const payload = await req.json().catch(() => null)
     if (!payload || typeof payload !== 'object') {
@@ -166,6 +179,10 @@ export async function PATCH(req: Request) {
 // DELETE /api/reference-videos
 // body: { id: string, user_id: string }
 export async function DELETE(req: Request) {
+  const ck = cookies().get('cw_session')?.value || ''
+  if (!/role=admin/.test(ck)) {
+    return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
+  }
   try {
     const payload = await req.json().catch(() => null)
     if (!payload || typeof payload !== 'object') {

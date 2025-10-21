@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { cookies } from 'next/headers'
 import { getDb } from '@/lib/mongodb'
 import { getCurrentUser } from '@/lib/auth'
 import { ObjectId } from 'mongodb'
@@ -7,6 +8,10 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function GET(req: Request) {
+  const ck = cookies().get('cw_session')?.value || ''
+  if (!/role=admin/.test(ck)) {
+    return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
+  }
   try {
     const { searchParams } = new URL(req.url)
     const scriptId = searchParams.get('script_id')
@@ -48,6 +53,10 @@ export async function GET(req: Request) {
 // POST /api/generated-videos
 // body: { image_url: string, prompt: string, script_id?: string | null, shot_number?: number, status?: string, video_url?: string }
 export async function POST(req: Request) {
+  const ck = cookies().get('cw_session')?.value || ''
+  if (!/role=admin/.test(ck)) {
+    return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
+  }
   try {
     const payload = await req.json().catch(() => null)
     if (!payload || typeof payload !== 'object') {
@@ -97,6 +106,10 @@ export async function POST(req: Request) {
 // PATCH /api/generated-videos
 // body: { id: string, status?: string, video_url?: string }
 export async function PATCH(req: Request) {
+  const ck = cookies().get('cw_session')?.value || ''
+  if (!/role=admin/.test(ck)) {
+    return NextResponse.json({ error: 'Guest mode: database access disabled' }, { status: 403 })
+  }
   try {
     const payload = await req.json().catch(() => null)
     if (!payload || typeof payload !== 'object') {

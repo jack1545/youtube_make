@@ -30,7 +30,10 @@ export interface BatchGenerationOptions {
   responseFormat?: 'url' | 'b64_json'
   // 新增：关联脚本ID，服务端据此持久化到 generated_images
   scriptId?: string
+  // 新增：允许显式传入 Doubao API Key 覆盖（访客模式）
+  doubaoApiKeyOverride?: string
 }
+
 
 export async function generateImage(params: ImageGenerationParams): Promise<GeneratedImage> {
   const apiKey = process.env.DOUBAO_API_KEY
@@ -109,6 +112,21 @@ export async function generateBatchImages(
   // When running in the browser, defer to the Next.js API route so the server-side
   // environment (or Supabase stored key) can supply the Doubao credential safely.
   if (typeof window !== 'undefined') {
+    let override: string | undefined = options.doubaoApiKeyOverride
+    try {
+      const mode = localStorage.getItem('api_key_storage_mode')
+      const raw = localStorage.getItem('api_key_settings')
+      const exp = localStorage.getItem('api_key_cache_expires_at')
+      const isExpired = exp ? Date.now() > new Date(exp).getTime() : false
+      if (!override && mode === 'cache' && raw && !isExpired) {
+        const settings = JSON.parse(raw)
+        const key = settings?.doubao_api_key
+        if (typeof key === 'string' && key.trim().length >= 20) {
+          override = key.trim()
+        }
+      }
+    } catch { /* ignore */ }
+
     const response = await fetch('/api/doubao/generate-batch', {
       method: 'POST',
       headers: {
@@ -121,7 +139,9 @@ export async function generateBatchImages(
           responseFormat: options.responseFormat
         },
         // 传递脚本ID用于服务端持久化
-        script_id: options.scriptId
+        script_id: options.scriptId,
+        // 新增：访客模式下，允许将浏览器缓存中的 Doubao Key 传递到服务端
+        doubao_api_key_override: override
       })
     })
 

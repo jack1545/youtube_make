@@ -17,6 +17,7 @@ function getDbName(): string {
 }
 
 export async function getDb(): Promise<Db> {
+  // 注意：会话校验在各 API 路由中完成，这里仅负责连接与缓存
   if (cachedDb && cachedClient) {
     return cachedDb
   }
